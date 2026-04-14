@@ -122,16 +122,26 @@ pub async fn set(
         return Ok(());
     }
 
-    ctx.say("Lavalink config updated. Run `/lavalink connect` to apply.")
+    ctx.say("Lavalink config updated. Restart the bot to apply.")
         .await?;
     Ok(())
 }
 
-/// Connect (or reconnect) to Lavalink using the current configuration.
+/// Connect to Lavalink using the current configuration.
+///
+/// This is a no-op if a client already exists. `lavalink-rs` 0.15 has no
+/// client shutdown API — its reconnect task lives for the lifetime of the
+/// process — so replacing the client in-place leaks a zombie that spams
+/// reconnect attempts. Apply config changes by restarting the bot instead.
 #[poise::command(slash_command, prefix_command, rename = "connect")]
 pub async fn connect_cmd(ctx: Context<'_>) -> Result<(), Error> {
-    // Drop any existing client so the old websocket is released.
-    *ctx.data().lavalink.write().await = None;
+    if ctx.data().lavalink.read().await.is_some() {
+        ctx.say(
+            "Lavalink is already connected. Restart the bot to apply configuration changes.",
+        )
+        .await?;
+        return Ok(());
+    }
 
     let user_id = ctx.serenity_context().cache.current_user().id;
     match connect(ctx.data(), user_id).await {

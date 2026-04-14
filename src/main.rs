@@ -4,6 +4,7 @@ mod handlers;
 mod lavalink;
 mod logging;
 mod music;
+mod reply;
 mod status;
 
 use std::env;
@@ -25,11 +26,16 @@ pub type Context<'a> = poise::Context<'a, Data, Error>;
 
 /// Main function to run the bot
 async fn async_main() -> Result<(), Error> {
+    // Load variables from a local .env file (if present) before anything else
+    // reads from the environment.
+    let _ = dotenvy::dotenv();
+
     // Initialize logging
     logging::init()?;
 
     // Load environment variables
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");
+    let prefix = env::var("PREFIX").unwrap_or_else(|_| "!".to_string());
 
     // Load the bot's data from file
     info!("Loading bot data...");
@@ -50,6 +56,7 @@ async fn async_main() -> Result<(), Error> {
                 music::pause(),
                 music::resume(),
                 music::skip(),
+                music::queue(),
             ],
             pre_command: |ctx| {
                 Box::pin(async move {
@@ -68,6 +75,10 @@ async fn async_main() -> Result<(), Error> {
                     // Log the error using our logging system
                     crate::logging::log_command_error(&error);
                 })
+            },
+            prefix_options: poise::PrefixFrameworkOptions {
+                prefix: Some(prefix),
+                ..Default::default()
             },
             ..Default::default()
         })
@@ -95,8 +106,8 @@ async fn async_main() -> Result<(), Error> {
         .build();
 
     // Configure the Serenity client
+    // | GatewayIntents::MESSAGE_CONTENT
     let intents = GatewayIntents::non_privileged()
-        | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILD_VOICE_STATES;
     let mut client = serenity::ClientBuilder::new(token, intents)
         .event_handler(handlers::Handler)

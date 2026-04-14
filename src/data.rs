@@ -6,6 +6,8 @@ use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::reply::{Slot, TrackedMessage};
+
 /// Guild configuration structure.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct GuildConfig {
@@ -40,6 +42,24 @@ impl Default for LavalinkConfig {
     }
 }
 
+impl LavalinkConfig {
+    /// Build a config from `LAVALINK_HOST`, `LAVALINK_PASSWORD`, and
+    /// `LAVALINK_SSL` environment variables, falling back to defaults for
+    /// any unset fields.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        Self {
+            hostname: std::env::var("LAVALINK_HOST").unwrap_or(defaults.hostname),
+            password: std::env::var("LAVALINK_PASSWORD").unwrap_or(defaults.password),
+            is_ssl: std::env::var("LAVALINK_SSL")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .unwrap_or(defaults.is_ssl),
+        }
+    }
+}
+
 /// Main centrailized data structure for the bot. Should it use the `InnerData` idiom?
 #[derive(Clone)]
 pub struct Data {
@@ -56,6 +76,9 @@ pub struct Data {
     /// It will be replaced when the configuration is changed and the connection
     /// is re-established.
     pub lavalink: Arc<RwLock<Option<LavalinkClient>>>,
+    /// Live bot-sent messages tracked per (guild, slot) for the
+    /// replace-previous behavior. In-memory only; not persisted.
+    pub tracked_messages: Arc<dashmap::DashMap<(serenity::GuildId, Slot), TrackedMessage>>,
     /// When the bot process started.
     pub started_at: DateTime<Utc>,
 }
@@ -83,8 +106,9 @@ impl Data {
         Self {
             guild_configs: dashmap::DashMap::new(),
             cache: Arc::new(serenity::Cache::default()),
-            lavalink_config: Arc::new(RwLock::new(LavalinkConfig::default())),
+            lavalink_config: Arc::new(RwLock::new(LavalinkConfig::from_env())),
             lavalink: Arc::new(RwLock::new(None)),
+            tracked_messages: Arc::new(dashmap::DashMap::new()),
             started_at: Utc::now(),
         }
     }

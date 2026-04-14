@@ -3,14 +3,55 @@
 //! All commands require that a Lavalink client has been successfully connected
 //! (see [`crate::lavalink`]). They share a common helper, [`_join`], to ensure
 //! the bot is in a voice channel before attempting playback operations.
+//!
+//! User-facing replies go through [`crate::reply`] so the music control panel
+//! collapses to a single live message per slot (`NowPlaying`, `QueueView`,
+//! `Status`) and the invoker's prefix message is cleaned up when possible.
 
+use crate::reply::{self, Reply, Slot};
 use crate::{Context, Error};
-
-use std::ops::Deref;
 
 use lavalink_rs::prelude::*;
 use poise::serenity_prelude as serenity;
-use serenity::Mentionable;
+use serenity::{CreateEmbed, Mentionable};
+
+const MUSIC_EMBED_COLOR: u32 = 0x1DB954;
+
+fn music_embed(title: impl Into<String>, description: impl Into<String>) -> CreateEmbed {
+    CreateEmbed::new()
+        .title(title)
+        .description(description)
+        .color(MUSIC_EMBED_COLOR)
+}
+
+async fn status(
+    ctx: &Context<'_>,
+    msg: impl Into<String>,
+    ephemeral: bool,
+) -> Result<(), Error> {
+    reply::send(
+        ctx,
+        Reply::new()
+            .content(msg)
+            .slot(Slot::Status)
+            .ephemeral(ephemeral)
+            .delete_invoker(true),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn now_playing(ctx: &Context<'_>, embed: CreateEmbed) -> Result<(), Error> {
+    reply::send(
+        ctx,
+        Reply::new()
+            .embed(embed)
+            .slot(Slot::NowPlaying)
+            .delete_invoker(true),
+    )
+    .await?;
+    Ok(())
+}
 
 /// Internal helper: ensure the bot is connected to a voice channel and has a
 /// player context registered with Lavalink. Returns `true` if a new connection
@@ -25,8 +66,12 @@ async fn _join(
         match guard.as_ref() {
             Some(c) => c.clone(),
             None => {
-                ctx.say("Lavalink is not connected. Ask an admin to run `/lavalink connect`.")
-                    .await?;
+                status(
+                    ctx,
+                    "Lavalink is not connected. Ask an admin to run `/lavalink connect`.",
+                    true,
+                )
+                .await?;
                 return Err("lavalink not connected".into());
             }
         }
@@ -41,16 +86,23 @@ async fn _join(
         let connect_to = match channel_id {
             Some(x) => x,
             None => {
-                let guild = ctx.guild().ok_or("guild cache miss")?.deref().clone();
-                let user_channel_id = guild
-                    .voice_states
-                    .get(&ctx.author().id)
-                    .and_then(|voice_state| voice_state.channel_id);
+                let cache = &ctx.serenity_context().cache;
+                let author_id = ctx.author().id;
+                let lookup = cache.guild(guild_id).and_then(|g| {
+                    g.voice_states
+                        .get(&author_id)
+                        .and_then(|vs| vs.channel_id)
+                });
 
-                match user_channel_id {
+                match lookup {
                     Some(channel) => channel,
                     None => {
-                        ctx.say("You are not in a voice channel.").await?;
+                        status(
+                            ctx,
+                            "You're not in a voice channel. Join one first, or pass a channel explicitly.",
+                            true,
+                        )
+                        .await?;
                         return Err("Not in a voice channel".into());
                     }
                 }
@@ -62,12 +114,11 @@ async fn _join(
                 lava_client
                     .create_player_context(guild_id, connection_info)
                     .await?;
-
-                ctx.say(format!("Joined {}", connect_to.mention())).await?;
+                status(ctx, format!("Joined {}", connect_to.mention()), false).await?;
                 return Ok(true);
             }
             Err(why) => {
-                ctx.say(format!("Error joining the channel: {why}")).await?;
+                status(ctx, format!("Error joining the channel: {why}"), true).await?;
                 return Err(why.into());
             }
         }
@@ -107,7 +158,7 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
         manager.remove(guild_id).await?;
     }
 
-    ctx.say("Left voice channel.").await?;
+    status(&ctx, "Left voice channel.", false).await?;
     Ok(())
 }
 
@@ -134,7 +185,7 @@ pub async fn play(
         .ok_or("lavalink not connected")?;
 
     let Some(player) = lava_client.get_player_context(guild_id) else {
-        ctx.say("Join the bot to a voice channel first.").await?;
+        status(&ctx, "Join the bot to a voice channel first.", true).await?;
         return Ok(());
     };
 
@@ -142,7 +193,13 @@ pub async fn play(
         if term.starts_with("http") {
             term
         } else {
-            SearchEngines::YouTube.to_query(&term)?
+            match SearchEngines::YouTube.to_query(&term) {
+                Ok(q) => q,
+                Err(why) => {
+                    status(&ctx, format!("Error processing search term: {why}"), true).await?;
+                    return Err(why.into());
+                }
+            }
         }
     } else {
         if let Ok(player_data) = player.get_player().await {
@@ -153,13 +210,19 @@ pub async fn play(
             {
                 player.skip()?;
             } else {
-                ctx.say("The queue is empty.").await?;
+                status(&ctx, "The queue is empty.", true).await?;
             }
         }
         return Ok(());
     };
 
-    let loaded_tracks = lava_client.load_tracks(guild_id, &query).await?;
+    let loaded_tracks = match lava_client.load_tracks(guild_id, &query).await {
+        Ok(x) => x,
+        Err(why) => {
+            status(&ctx, format!("Error loading track: {why}"), true).await?;
+            return Err(why.into());
+        }
+    };
 
     let mut playlist_info = None;
 
@@ -171,30 +234,26 @@ pub async fn play(
             x.tracks.iter().map(|x| x.clone().into()).collect()
         }
         _ => {
-            ctx.say(format!("No results for `{query}`")).await?;
+            status(&ctx, format!("No results for `{query}`"), true).await?;
             return Ok(());
         }
     };
 
-    if let Some(info) = playlist_info {
-        ctx.say(format!("Added playlist to queue: {}", info.name))
-            .await?;
+    let announcement = if let Some(info) = playlist_info {
+        music_embed(
+            "Added playlist to queue",
+            format!("**{}** — {} track(s)", info.name, tracks.len()),
+        )
     } else {
         let track = &tracks[0].track;
-        if let Some(uri) = &track.info.uri {
-            ctx.say(format!(
-                "Added to queue: [{} - {}](<{}>)",
-                track.info.author, track.info.title, uri
-            ))
-            .await?;
+        let body = if let Some(uri) = &track.info.uri {
+            format!("[{} — {}](<{}>)", track.info.author, track.info.title, uri)
         } else {
-            ctx.say(format!(
-                "Added to queue: {} - {}",
-                track.info.author, track.info.title
-            ))
-            .await?;
-        }
-    }
+            format!("{} — {}", track.info.author, track.info.title)
+        };
+        music_embed("Added to queue", body)
+    };
+    now_playing(&ctx, announcement).await?;
 
     for i in &mut tracks {
         i.track.user_data = Some(serde_json::json!({"requester_id": ctx.author().id.get()}));
@@ -203,11 +262,17 @@ pub async fn play(
     let queue = player.get_queue();
     queue.append(tracks.into())?;
 
-    if let Ok(player_data) = player.get_player().await {
-        if player_data.track.is_none() && queue.get_track(0).await.is_ok_and(|x| x.is_some()) {
-            player.skip()?;
+    match player.get_player().await {
+        Ok(player_data) => {
+            if player_data.track.is_none() && queue.get_track(0).await.is_ok_and(|x| x.is_some()) {
+                player.skip()?;
+            }
         }
-    }
+        Err(why) => {
+            status(&ctx, format!("Error getting player data: {why}"), true).await?;
+            return Err(why.into());
+        }
+    };
 
     Ok(())
 }
@@ -225,16 +290,16 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         .ok_or("lavalink not connected")?;
 
     let Some(player) = lava_client.get_player_context(guild_id) else {
-        ctx.say("Join the bot to a voice channel first.").await?;
+        status(&ctx, "Join the bot to a voice channel first.", true).await?;
         return Ok(());
     };
 
-    let now_playing = player.get_player().await?.track;
-    if let Some(np) = now_playing {
+    let np = player.get_player().await?.track;
+    if let Some(np) = np {
         player.stop_now().await?;
-        ctx.say(format!("Stopped {}", np.info.title)).await?;
+        now_playing(&ctx, music_embed("Stopped", np.info.title)).await?;
     } else {
-        ctx.say("Nothing to stop.").await?;
+        status(&ctx, "Nothing to stop.", true).await?;
     }
     Ok(())
 }
@@ -252,12 +317,12 @@ pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
         .ok_or("lavalink not connected")?;
 
     let Some(player) = lava_client.get_player_context(guild_id) else {
-        ctx.say("Join the bot to a voice channel first.").await?;
+        status(&ctx, "Join the bot to a voice channel first.", true).await?;
         return Ok(());
     };
 
     player.set_pause(true).await?;
-    ctx.say("Paused.").await?;
+    now_playing(&ctx, music_embed("Paused", "⏸")).await?;
     Ok(())
 }
 
@@ -274,12 +339,12 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
         .ok_or("lavalink not connected")?;
 
     let Some(player) = lava_client.get_player_context(guild_id) else {
-        ctx.say("Join the bot to a voice channel first.").await?;
+        status(&ctx, "Join the bot to a voice channel first.", true).await?;
         return Ok(());
     };
 
     player.set_pause(false).await?;
-    ctx.say("Resumed.").await?;
+    now_playing(&ctx, music_embed("Resumed", "▶")).await?;
     Ok(())
 }
 
@@ -296,17 +361,82 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
         .ok_or("lavalink not connected")?;
 
     let Some(player) = lava_client.get_player_context(guild_id) else {
-        ctx.say("Join the bot to a voice channel first.").await?;
+        status(&ctx, "Join the bot to a voice channel first.", true).await?;
         return Ok(());
     };
 
-    let now_playing = player.get_player().await?.track;
-    if let Some(np) = now_playing {
+    let np = player.get_player().await?.track;
+    if let Some(np) = np {
         player.skip()?;
-        ctx.say(format!("Skipped {}", np.info.title)).await?;
+        now_playing(&ctx, music_embed("Skipped", np.info.title)).await?;
     } else {
-        ctx.say("Nothing to skip.").await?;
+        status(&ctx, "Nothing to skip.", true).await?;
     }
+    Ok(())
+}
+
+/// Show the current queue: what's playing now and the next tracks in line.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
+    const MAX_SHOWN: usize = 10;
+
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let lava_client = ctx
+        .data()
+        .lavalink
+        .read()
+        .await
+        .clone()
+        .ok_or("lavalink not connected")?;
+
+    let Some(player) = lava_client.get_player_context(guild_id) else {
+        status(&ctx, "Nothing is playing.", true).await?;
+        return Ok(());
+    };
+
+    let np = player.get_player().await?.track;
+    let queue_tracks = player.get_queue().get_queue().await?;
+    let total = queue_tracks.len();
+
+    let np_line = match np {
+        Some(np) => {
+            let info = &np.info;
+            if let Some(uri) = &info.uri {
+                format!("[{} — {}](<{}>)", info.author, info.title, uri)
+            } else {
+                format!("{} — {}", info.author, info.title)
+            }
+        }
+        None => "_nothing_".to_string(),
+    };
+
+    let mut body = format!("**Now playing:** {np_line}\n");
+    if total == 0 {
+        body.push_str("\nQueue is empty.");
+    } else {
+        body.push_str(&format!("\n**Up next ({total} track(s)):**\n"));
+        for (i, item) in queue_tracks.iter().take(MAX_SHOWN).enumerate() {
+            let info = &item.track.info;
+            let line = if let Some(uri) = &info.uri {
+                format!("{}. [{} — {}](<{}>)\n", i + 1, info.author, info.title, uri)
+            } else {
+                format!("{}. {} — {}\n", i + 1, info.author, info.title)
+            };
+            body.push_str(&line);
+        }
+        if total > MAX_SHOWN {
+            body.push_str(&format!("…and {} more", total - MAX_SHOWN));
+        }
+    }
+
+    reply::send(
+        &ctx,
+        Reply::new()
+            .embed(music_embed("Queue", body))
+            .slot(Slot::QueueView)
+            .delete_invoker(true),
+    )
+    .await?;
     Ok(())
 }
 
@@ -323,6 +453,7 @@ mod tests {
         assert_eq!(pause().name, "pause");
         assert_eq!(resume().name, "resume");
         assert_eq!(skip().name, "skip");
+        assert_eq!(queue().name, "queue");
 
         assert!(play().guild_only);
         assert!(skip().guild_only);
