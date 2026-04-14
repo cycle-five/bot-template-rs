@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+use lavalink_rs::client::LavalinkClient;
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 /// Guild configuration structure.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -13,6 +16,30 @@ pub struct GuildConfig {
     pub music_channel_id: Option<u64>,
 }
 
+/// Configuration for connecting to a Lavalink node.
+///
+/// All fields may be updated at runtime via bot commands and then persisted
+/// to the config directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LavalinkConfig {
+    /// Hostname (including port) for the Lavalink node, e.g. `localhost:2333`.
+    pub hostname: String,
+    /// Password used to authenticate with the Lavalink node.
+    pub password: String,
+    /// Whether to connect using TLS / WSS.
+    pub is_ssl: bool,
+}
+
+impl Default for LavalinkConfig {
+    fn default() -> Self {
+        Self {
+            hostname: "localhost:2333".to_string(),
+            password: "youshallnotpass".to_string(),
+            is_ssl: false,
+        }
+    }
+}
+
 /// Main centrailized data structure for the bot. Should it use the `InnerData` idiom?
 #[derive(Clone)]
 pub struct Data {
@@ -21,6 +48,16 @@ pub struct Data {
     pub guild_configs: dashmap::DashMap<serenity::GuildId, GuildConfig>,
     // Cache from the bot's context, you'll probably need this for some commands
     pub cache: Arc<serenity::Cache>,
+    /// The Lavalink connection configuration. Mutable at runtime.
+    pub lavalink_config: Arc<RwLock<LavalinkConfig>>,
+    /// The active Lavalink client, if connected.
+    ///
+    /// This is `None` until the bot successfully connects to a Lavalink node.
+    /// It will be replaced when the configuration is changed and the connection
+    /// is re-established.
+    pub lavalink: Arc<RwLock<Option<LavalinkClient>>>,
+    /// When the bot process started.
+    pub started_at: DateTime<Utc>,
 }
 
 impl Default for Data {
@@ -34,6 +71,7 @@ impl std::fmt::Debug for Data {
         f.debug_struct("Data")
             .field("guild_configs", &self.guild_configs)
             .field("cache", &self.cache)
+            .field("started_at", &self.started_at)
             .finish()
     }
 }
@@ -45,20 +83,25 @@ impl Data {
         Self {
             guild_configs: dashmap::DashMap::new(),
             cache: Arc::new(serenity::Cache::default()),
+            lavalink_config: Arc::new(RwLock::new(LavalinkConfig::default())),
+            lavalink: Arc::new(RwLock::new(None)),
+            started_at: Utc::now(),
         }
     }
 
     /// Load data from YAML file
     ///
-    /// This method loads guild configurations from a YAML file.
-    /// If the file doesn't exist, it returns a new empty Data instance.
+    /// This method loads guild configurations and the Lavalink configuration
+    /// from the config directory. If the files don't exist, it returns a new
+    /// empty Data instance with default settings.
     pub async fn load() -> Self {
         const CONFIG_FILE: &str = "config/bot_config.yaml";
-        
+        const LAVALINK_FILE: &str = "config/lavalink.yaml";
+
         // Create a new empty Data instance
         let data = Self::new();
-        
-        // Check if the config file exists
+
+        // Check if the guild config file exists
         if let Ok(file_content) = tokio::fs::read_to_string(CONFIG_FILE).await {
             // Try to deserialize the file content
             if let Ok(configs) = serde_yaml::from_str::<Vec<GuildConfig>>(&file_content) {
@@ -69,42 +112,55 @@ impl Data {
                 }
             }
         }
-        
+
+        // Load Lavalink configuration if present
+        if let Ok(file_content) = tokio::fs::read_to_string(LAVALINK_FILE).await {
+            if let Ok(config) = serde_yaml::from_str::<LavalinkConfig>(&file_content) {
+                *data.lavalink_config.write().await = config;
+            }
+        }
+
         data
     }
 
     /// Save data to YAML file
     ///
-    /// This method saves all guild configurations to a YAML file.
-    /// It creates the config directory if it doesn't exist.
+    /// This method saves all guild configurations and the current Lavalink
+    /// configuration to disk. It creates the config directory if it doesn't
+    /// exist.
     ///
     /// # Errors
     ///
     /// This function will return an error if:
     /// - The config directory cannot be created
-    /// - The guild configurations cannot be serialized to YAML
-    /// - The YAML data cannot be written to the config file
+    /// - The configurations cannot be serialized to YAML
+    /// - The YAML data cannot be written to disk
     pub async fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         const CONFIG_DIR: &str = "config";
         const CONFIG_FILE: &str = "config/bot_config.yaml";
-        
+        const LAVALINK_FILE: &str = "config/lavalink.yaml";
+
         // Create the config directory if it doesn't exist
         if !std::path::Path::new(CONFIG_DIR).exists() {
             tokio::fs::create_dir_all(CONFIG_DIR).await?;
         }
-        
+
         // Collect all guild configs into a Vec for serialization
         let configs: Vec<GuildConfig> = self.guild_configs
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
-        
+
         // Serialize the configs to YAML
         let yaml = serde_yaml::to_string(&configs)?;
-        
+
         // Write the YAML to the config file
         tokio::fs::write(CONFIG_FILE, yaml).await?;
-        
+
+        // Persist the Lavalink configuration
+        let lavalink_yaml = serde_yaml::to_string(&*self.lavalink_config.read().await)?;
+        tokio::fs::write(LAVALINK_FILE, lavalink_yaml).await?;
+
         Ok(())
     }
 }
@@ -114,11 +170,12 @@ impl Data {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_data_new() {
+    #[tokio::test]
+    async fn test_data_new() {
         let data = Data::new();
         assert_eq!(data.guild_configs.len(), 0);
         assert!(data.cache.guilds().is_empty());
+        assert!(data.lavalink.read().await.is_none());
     }
 
     #[test]
@@ -126,6 +183,13 @@ mod tests {
         let config = GuildConfig::default();
         assert_eq!(config.guild_id, 0);
         assert!(config.music_channel_id.is_none());
+    }
+
+    #[test]
+    fn test_lavalink_config_default() {
+        let config = LavalinkConfig::default();
+        assert_eq!(config.hostname, "localhost:2333");
+        assert!(!config.is_ssl);
     }
 
     #[test]
@@ -143,15 +207,30 @@ mod tests {
             guild_id: 12345,
             music_channel_id: Some(67890),
         };
-        
+
         // Test serialization
         let serialized = serde_yaml::to_string(&config).expect("Failed to serialize");
         assert!(serialized.contains("guild_id: 12345"));
         assert!(serialized.contains("music_channel_id: 67890"));
-        
+
         // Test deserialization
         let deserialized: GuildConfig = serde_yaml::from_str(&serialized).expect("Failed to deserialize");
         assert_eq!(deserialized.guild_id, 12345);
         assert_eq!(deserialized.music_channel_id, Some(67890));
+    }
+
+    #[test]
+    fn test_lavalink_config_serialization() {
+        let config = LavalinkConfig {
+            hostname: "example.com:2333".to_string(),
+            password: "secret".to_string(),
+            is_ssl: true,
+        };
+
+        let yaml = serde_yaml::to_string(&config).expect("serialize");
+        let back: LavalinkConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(back.hostname, "example.com:2333");
+        assert_eq!(back.password, "secret");
+        assert!(back.is_ssl);
     }
 }
