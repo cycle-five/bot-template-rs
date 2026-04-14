@@ -6,17 +6,22 @@ edition = "2024"
 
 [dependencies]
 dashmap = "5.5.3"
-serenity = "0.12.4"
+serenity = { version = "0.12.4", features = ["voice"] }
 poise = "0.6.1"
-tokio = { version = "1.44.2", features = ["rt-multi-thread", "fs", "signal", "macros", "test-util"] }
+tokio = { version = "1.44.2", features = ["rt-multi-thread", "fs", "signal", "macros", "test-util", "sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
+serde_json = "1.0"
 
 # Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Voice / music
+songbird = { version = "0.5", default-features = false, features = ["gateway", "serenity", "native"] }
+lavalink-rs = { version = "0.14", default-features = false, features = ["songbird", "serenity", "tungstenite-native-tls", "macros"] }
 
 [dev-dependencies]
 mockall = "0.13.1"
