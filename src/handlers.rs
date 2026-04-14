@@ -1,4 +1,4 @@
-use poise::serenity_prelude::{self as serenity, Context, EventHandler, GuildId, Ready};
+use poise::serenity_prelude::{self as serenity, Context, EventHandler, Guild, GuildId, Ready};
 use tracing::{info, warn};
 
 pub struct Handler;
@@ -9,7 +9,10 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         let user_name = ready.user.name.clone();
         let shard_id = ctx.shard_id;
-        info!("Connected as {user_name}, shard {shard_id}");
+        let ready_guild_count = ready.guilds.len();
+        info!(
+            "Connected as {user_name}, shard {shard_id}, ready payload lists {ready_guild_count} guild(s)"
+        );
     }
 
     /// Called when the cache is fully populated.
@@ -22,6 +25,16 @@ impl EventHandler for Handler {
             );
         }
         info!("Cache ready! The bot is in {guild_count} guild(s)");
+    }
+
+    async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
+        info!(
+            "guild_create: id={} name={} is_new={:?} cache_size_now={}",
+            guild.id,
+            guild.name,
+            is_new,
+            ctx.cache.guild_count()
+        );
     }
 }
 
