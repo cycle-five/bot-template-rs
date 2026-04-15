@@ -73,8 +73,9 @@ pub struct Data {
     /// The active Lavalink client, if connected.
     ///
     /// This is `None` until the bot successfully connects to a Lavalink node.
-    /// It will be replaced when the configuration is changed and the connection
-    /// is re-established.
+    /// Updating `lavalink_config` does not replace an existing client or
+    /// re-establish the connection in place; applying a new configuration to an
+    /// already-connected client currently requires restarting the bot.
     pub lavalink: Arc<RwLock<Option<LavalinkClient>>>,
     /// Live bot-sent messages tracked per (guild, slot) for the
     /// replace-previous behavior. In-memory only; not persisted.
