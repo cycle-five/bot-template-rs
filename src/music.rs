@@ -228,7 +228,13 @@ pub async fn play(
 
     let mut tracks: Vec<TrackInQueue> = match loaded_tracks.data {
         Some(TrackLoadData::Track(x)) => vec![x.into()],
-        Some(TrackLoadData::Search(x)) => vec![x[0].clone().into()],
+        Some(TrackLoadData::Search(x)) => {
+            let Some(first) = x.first() else {
+                status(&ctx, format!("No results for `{query}`"), true).await?;
+                return Ok(());
+            };
+            vec![first.clone().into()]
+        }
         Some(TrackLoadData::Playlist(x)) => {
             playlist_info = Some(x.info);
             x.tracks.iter().map(|x| x.clone().into()).collect()
