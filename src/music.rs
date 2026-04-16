@@ -165,15 +165,21 @@ pub async fn play(
     join_voice(&ctx, guild_id, None).await?;
 
     let Some(query) = term else {
-        // No argument: resume if paused, then advance if idle.
+        // No argument: resume if paused and show what's playing. Slash
+        // commands must respond within ~3s or Discord shows "application did
+        // not respond", so always send something back here.
         backend.resume(guild_id).await.ok();
-        let np = backend.now_playing(guild_id).await?;
-        let queue = backend.queue_snapshot(guild_id).await?;
-        if np.is_none() {
-            if queue.is_empty() {
-                status(&ctx, "The queue is empty.", true).await?;
-            } else {
-                backend.skip(guild_id).await?;
+        match backend.now_playing(guild_id).await? {
+            Some(t) => {
+                now_playing(&ctx, music_embed("Now playing", track_line(&t))).await?;
+            }
+            None => {
+                status(
+                    &ctx,
+                    "Nothing is playing. Pass a URL or search term to queue something.",
+                    true,
+                )
+                .await?;
             }
         }
         return Ok(());
