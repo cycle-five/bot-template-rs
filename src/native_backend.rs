@@ -14,11 +14,13 @@
 //! based `Compose` implementation so the common path doesn't need yt-dlp on
 //! disk. Keep yt-dlp as a fallback for sites rusty_ytdl can't handle.
 //!
-//! # Known limitations (v1)
+//! # Queue metadata sync
 //!
-//! `now_playing`/`queue_snapshot` metadata isn't refreshed when songbird
-//! auto-advances on track-end — the display lags the driver. Fixing this
-//! needs a `TrackEvent::End` handler that pops our parallel metadata list.
+//! `now_playing`/`queue_snapshot` are kept aligned with songbird's own queue
+//! via a per-track `TrackEvent::End` handler that pops our parallel metadata
+//! list when the driver advances. `skip` and `stop` rely on this event too
+//! rather than mutating state themselves, so there's a single source of
+//! advancement to reason about.
 
 use std::sync::Arc;
 
@@ -27,8 +29,10 @@ use dashmap::DashMap;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, GuildId, UserId};
 use songbird::Songbird;
+use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
 use songbird::input::{Input, YoutubeDl};
 use tokio::sync::{Mutex, RwLock};
+use tracing::debug;
 
 use crate::Error;
 use crate::music_backend::{MusicBackend, PlayResult, Track};
@@ -39,6 +43,29 @@ struct GuildMeta {
     /// order, minus the current track). `now_playing` holds the head.
     queue: Vec<Track>,
     now_playing: Option<Track>,
+}
+
+/// Fires when songbird ends a track (natural end, skip, or stop). Advances
+/// our parallel metadata queue: pop the front into `now_playing`, or clear
+/// if the queue is empty.
+struct AdvanceOnEnd {
+    meta: Arc<DashMap<GuildId, Arc<Mutex<GuildMeta>>>>,
+    guild: GuildId,
+}
+
+#[async_trait]
+impl EventHandler for AdvanceOnEnd {
+    async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
+        if let Some(arc) = self.meta.get(&self.guild) {
+            let mut m = arc.value().lock().await;
+            if m.queue.is_empty() {
+                m.now_playing = None;
+            } else {
+                m.now_playing = Some(m.queue.remove(0));
+            }
+        }
+        None
+    }
 }
 
 /// Native backend: native playback via songbird + yt-dlp for resolution.
@@ -173,9 +200,25 @@ impl MusicBackend for NativeBackend {
         let mut meta = meta_arc.lock().await;
 
         let mut handler = call.lock().await;
-        let _handle = handler.enqueue_input(Input::from(src)).await;
+        let track_handle = handler.enqueue_input(Input::from(src)).await;
         let queue_len = handler.queue().current_queue().len();
         drop(handler);
+
+        // Attach the end-of-track advancer so our parallel metadata follows
+        // songbird's own queue as it progresses.
+        if let Err(e) = track_handle.add_event(
+            Event::Track(TrackEvent::End),
+            AdvanceOnEnd {
+                meta: self.meta.clone(),
+                guild,
+            },
+        ) {
+            debug!(
+                target: "bot_template_rs::music",
+                error = ?e,
+                "failed to attach track-end handler; metadata may lag"
+            );
+        }
 
         // songbird auto-starts playback when enqueueing into an empty queue.
         if queue_len == 1 {
@@ -191,17 +234,12 @@ impl MusicBackend for NativeBackend {
         let manager = self.songbird().await?;
         let call = manager.get(guild).ok_or("not in voice")?;
 
-        let meta_arc = self.guild_meta(guild);
-        let mut meta = meta_arc.lock().await;
-        let skipped = meta.now_playing.take();
+        // Snapshot the currently-playing track to return; the AdvanceOnEnd
+        // handler will update the live state asynchronously.
+        let skipped = self.guild_meta(guild).lock().await.now_playing.clone();
 
         let handler = call.lock().await;
         let _ = handler.queue().skip();
-        drop(handler);
-
-        if !meta.queue.is_empty() {
-            meta.now_playing = Some(meta.queue.remove(0));
-        }
         Ok(skipped)
     }
 
@@ -210,14 +248,17 @@ impl MusicBackend for NativeBackend {
         let call = manager.get(guild).ok_or("not in voice")?;
 
         let meta_arc = self.guild_meta(guild);
-        let mut meta = meta_arc.lock().await;
-        let stopped = meta.now_playing.take();
+        let stopped = {
+            // Clear queued metadata up-front so AdvanceOnEnd sees an empty
+            // queue and sets now_playing to None rather than advancing.
+            let mut meta = meta_arc.lock().await;
+            let was_playing = meta.now_playing.clone();
+            meta.queue.clear();
+            was_playing
+        };
 
         let handler = call.lock().await;
         handler.queue().stop();
-        drop(handler);
-
-        meta.queue.clear();
         Ok(stopped)
     }
 
