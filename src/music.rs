@@ -80,12 +80,22 @@ fn resolve_target_channel(
     })
 }
 
-/// Join helper: resolves the target channel, then asks the backend to join.
-async fn join_voice(
+/// Join helper: if the bot is already in voice and the caller didn't force a
+/// specific channel, accept the existing connection (so `/play` works from
+/// text channels even when the invoker isn't in voice themselves). Otherwise
+/// resolve the target channel and ask the backend to join.
+pub(crate) async fn join_voice(
     ctx: &Context<'_>,
     guild_id: serenity::GuildId,
     explicit: Option<serenity::ChannelId>,
-) -> Result<Option<serenity::ChannelId>, Error> {
+) -> Result<(), Error> {
+    if explicit.is_none()
+        && let Some(manager) = songbird::get(ctx.serenity_context()).await
+        && manager.get(guild_id).is_some()
+    {
+        return Ok(());
+    }
+
     let backend = ctx.data().music.clone();
     let Some(channel) = resolve_target_channel(ctx, guild_id, explicit) else {
         status(
@@ -104,7 +114,7 @@ async fn join_voice(
             if newly_joined {
                 status(ctx, format!("Joined {}", channel.mention()), false).await?;
             }
-            Ok(Some(channel))
+            Ok(())
         }
         Err(why) => {
             status(ctx, format!("Error joining the channel: {why}"), true).await?;
@@ -152,9 +162,7 @@ pub async fn play(
     let backend = ctx.data().music.clone();
 
     // Ensure the bot is in voice before doing anything.
-    if join_voice(&ctx, guild_id, None).await?.is_none() {
-        return Ok(());
-    }
+    join_voice(&ctx, guild_id, None).await?;
 
     let Some(query) = term else {
         // No argument: resume if paused, then advance if idle.

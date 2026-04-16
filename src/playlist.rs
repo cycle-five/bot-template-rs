@@ -306,27 +306,11 @@ pub async fn load(
         return Ok(());
     };
 
-    // Ensure voice connection via the invoker's current channel.
-    let cache = &ctx.serenity_context().cache;
-    let author_id = ctx.author().id;
-    let Some(channel) = cache.guild(guild_id).and_then(|g| {
-        g.voice_states
-            .get(&author_id)
-            .and_then(|vs| vs.channel_id)
-    }) else {
-        reply::send(
-            &ctx,
-            Reply::new()
-                .content("Join a voice channel first.")
-                .ephemeral(true)
-                .delete_invoker(true),
-        )
-        .await?;
+    // Ensure the bot is in voice. If the bot is already connected we'll use
+    // that channel; otherwise fall back to the invoker's voice channel.
+    if crate::music::join_voice(&ctx, guild_id, None).await.is_err() {
         return Ok(());
-    };
-    backend
-        .ensure_joined(ctx.serenity_context(), guild_id, channel)
-        .await?;
+    }
 
     let count = pl.tracks.len();
     for t in &pl.tracks {

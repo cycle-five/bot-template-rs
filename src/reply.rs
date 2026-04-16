@@ -19,11 +19,11 @@ use crate::{Context, Error};
 /// deletes the slot's previous message (if any) before posting the new one.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Slot {
-    #[cfg(feature = "music")]
+    #[cfg(feature = "music-core")]
     NowPlaying,
-    #[cfg(feature = "music")]
+    #[cfg(feature = "music-core")]
     QueueView,
-    #[cfg(feature = "music")]
+    #[cfg(feature = "music-core")]
     Status,
     BotStatus,
     Generic(Cow<'static, str>),

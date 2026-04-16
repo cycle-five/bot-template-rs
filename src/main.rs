@@ -4,7 +4,7 @@ mod handlers;
 #[cfg(feature = "lavalink")]
 mod lavalink;
 mod logging;
-#[cfg(feature = "music")]
+#[cfg(feature = "music-core")]
 mod music;
 #[cfg(feature = "music-core")]
 mod music_backend;
@@ -59,7 +59,7 @@ async fn async_main() -> Result<(), Error> {
                 let mut v = vec![commands::ping(), status::status()];
                 #[cfg(feature = "lavalink")]
                 v.push(lavalink::lavalink());
-                #[cfg(feature = "music")]
+                #[cfg(feature = "music-core")]
                 v.extend([
                     music::join(),
                     music::leave(),
