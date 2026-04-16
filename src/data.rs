@@ -16,16 +16,36 @@ use crate::music_backend::MusicBackend;
 use crate::native_backend::NativeBackend;
 #[cfg(feature = "playlists")]
 use crate::playlist::{PlaylistStore, YamlPlaylistStore};
+#[cfg(feature = "record")]
+use crate::record::RecordingSession;
 use crate::reply::{Slot, TrackedMessage};
 
 /// Guild configuration structure.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuildConfig {
     // The ID of the guild
     pub guild_id: u64,
     // For example if you're doing a music bot, this could be the ID of the channel
     // where the bot should send music messages.
     pub music_channel_id: Option<u64>,
+    /// Whether voice recording is permitted in this guild. Enforced by
+    /// `/record start`; admins can toggle via `/record disable|enable`.
+    #[serde(default = "default_true")]
+    pub recording_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for GuildConfig {
+    fn default() -> Self {
+        Self {
+            guild_id: 0,
+            music_channel_id: None,
+            recording_enabled: true,
+        }
+    }
 }
 
 /// Main centralized data structure for the bot.
@@ -50,6 +70,10 @@ pub struct Data {
     /// the [`PlaylistStore`] trait.
     #[cfg(feature = "playlists")]
     pub playlists: Arc<dyn PlaylistStore>,
+    /// At most one active recording session per guild. Inserted by
+    /// `/record start`, removed by `/record stop`.
+    #[cfg(feature = "record")]
+    pub recordings: Arc<dashmap::DashMap<serenity::GuildId, Arc<RecordingSession>>>,
     /// Live bot-sent messages tracked per (guild, slot) for the
     /// replace-previous behavior. In-memory only; not persisted.
     pub tracked_messages: Arc<dashmap::DashMap<(serenity::GuildId, Slot), TrackedMessage>>,
@@ -109,6 +133,8 @@ impl Data {
             music,
             #[cfg(feature = "playlists")]
             playlists: Arc::new(YamlPlaylistStore::new("config/playlists")) as Arc<dyn PlaylistStore>,
+            #[cfg(feature = "record")]
+            recordings: Arc::new(dashmap::DashMap::new()),
             tracked_messages: Arc::new(dashmap::DashMap::new()),
             started_at: Utc::now(),
         }
@@ -232,6 +258,7 @@ mod tests {
         let config = GuildConfig {
             guild_id: 12345,
             music_channel_id: Some(67890),
+            ..GuildConfig::default()
         };
 
         let serialized = serde_yaml::to_string(&config).expect("Failed to serialize");

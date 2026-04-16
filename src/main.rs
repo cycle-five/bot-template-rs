@@ -12,6 +12,8 @@ mod music_backend;
 mod native_backend;
 #[cfg(feature = "playlists")]
 mod playlist;
+#[cfg(feature = "record")]
+mod record;
 mod reply;
 mod status;
 
@@ -72,6 +74,8 @@ async fn async_main() -> Result<(), Error> {
                 ]);
                 #[cfg(feature = "playlists")]
                 v.push(playlist::playlist());
+                #[cfg(feature = "record")]
+                v.push(record::record());
                 v
             },
             pre_command: |ctx| {

@@ -31,6 +31,11 @@ symphonia = { version = "0.5", default-features = false, features = [
   "all-formats",
   "all-codecs",
 ], optional = true }
+# Ogg container + zip packaging for the `record` feature.
+ogg = { version = "0.9", optional = true }
+zip = { version = "2", default-features = false, features = [
+  "deflate",
+], optional = true }
 
 # Logging and tracing
 tracing = "0.1"
@@ -93,3 +98,15 @@ music-native = ["music-core", "native", "dep:serde_json"]
 # User-owned playlists: save/load/list/feature. Persists to YAML files via
 # the PlaylistStore trait; alternative stores (SQLite, etc.) can slot in.
 playlists = ["music-core"]
+# Voice receive capability (only songbird can do this; lavalink never receives).
+# Pulls the driver because songbird's event system lives under that feature.
+voice-recv = [
+  "voice",
+  "songbird/driver",
+  "songbird/receive",
+  "songbird/tungstenite",
+]
+# Per-user Opus-in-Ogg recording, packaged as a zip on /record stop.
+# Works alongside either playback backend since receive and playback are
+# independent concerns at the songbird layer.
+record = ["voice-recv", "dep:ogg", "dep:zip"]
