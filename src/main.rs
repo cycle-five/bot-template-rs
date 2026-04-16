@@ -8,7 +8,10 @@ mod logging;
 mod music;
 #[cfg(feature = "music-core")]
 mod music_backend;
-#[cfg(feature = "native")]
+// Native MusicBackend impl — only meaningful when we have the trait.
+// `native` alone (e.g. from `tts`) pulls the songbird driver for playback
+// without the music-command layer, so this module stays gated.
+#[cfg(all(feature = "native", feature = "music-core"))]
 mod native_backend;
 #[cfg(feature = "playlists")]
 mod playlist;
@@ -16,6 +19,8 @@ mod playlist;
 mod record;
 mod reply;
 mod status;
+#[cfg(feature = "tts")]
+mod tts;
 
 use std::env;
 
@@ -76,6 +81,8 @@ async fn async_main() -> Result<(), Error> {
                 v.push(playlist::playlist());
                 #[cfg(feature = "record")]
                 v.push(record::record());
+                #[cfg(feature = "tts")]
+                v.push(tts::tts());
                 v
             },
             pre_command: |ctx| {

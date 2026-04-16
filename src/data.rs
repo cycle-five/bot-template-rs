@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "lavalink")]
+#[cfg(any(feature = "lavalink", feature = "tts"))]
 use tracing::warn;
 
 #[cfg(feature = "lavalink")]
@@ -12,13 +12,15 @@ pub use crate::lavalink::LavalinkConfig;
 use crate::lavalink::LavalinkBackend;
 #[cfg(feature = "music-core")]
 use crate::music_backend::MusicBackend;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", feature = "music-core"))]
 use crate::native_backend::NativeBackend;
 #[cfg(feature = "playlists")]
 use crate::playlist::{PlaylistStore, YamlPlaylistStore};
 #[cfg(feature = "record")]
 use crate::record::RecordingSession;
 use crate::reply::{Slot, TrackedMessage};
+#[cfg(feature = "tts")]
+use crate::tts::{TtsClient, TtsConfig};
 
 /// Guild configuration structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +76,9 @@ pub struct Data {
     /// `/record start`, removed by `/record stop`.
     #[cfg(feature = "record")]
     pub recordings: Arc<dashmap::DashMap<serenity::GuildId, Arc<RecordingSession>>>,
+    /// TTS client; config is runtime-mutable via `/tts set`.
+    #[cfg(feature = "tts")]
+    pub tts: Arc<TtsClient>,
     /// Live bot-sent messages tracked per (guild, slot) for the
     /// replace-previous behavior. In-memory only; not persisted.
     pub tracked_messages: Arc<dashmap::DashMap<(serenity::GuildId, Slot), TrackedMessage>>,
@@ -103,7 +108,7 @@ impl Data {
     pub fn new() -> Self {
         #[cfg(feature = "lavalink")]
         let lavalink = Arc::new(LavalinkBackend::new(LavalinkConfig::from_env()));
-        #[cfg(feature = "native")]
+        #[cfg(all(feature = "native", feature = "music-core"))]
         let native = Arc::new(NativeBackend::new());
 
         // Backend selection: when both are compiled in, honor the
@@ -135,6 +140,8 @@ impl Data {
             playlists: Arc::new(YamlPlaylistStore::new("config/playlists")) as Arc<dyn PlaylistStore>,
             #[cfg(feature = "record")]
             recordings: Arc::new(dashmap::DashMap::new()),
+            #[cfg(feature = "tts")]
+            tts: Arc::new(TtsClient::new(TtsConfig::from_env())),
             tracked_messages: Arc::new(dashmap::DashMap::new()),
             started_at: Utc::now(),
         }
@@ -184,6 +191,21 @@ impl Data {
             }
         }
 
+        #[cfg(feature = "tts")]
+        {
+            const TTS_FILE: &str = "config/tts.yaml";
+            if let Ok(content) = tokio::fs::read_to_string(TTS_FILE).await {
+                match serde_yaml::from_str::<TtsConfig>(&content) {
+                    Ok(cfg) => data.tts.set_config(cfg).await,
+                    Err(e) => warn!(
+                        target: "bot_template_rs::data",
+                        error = %e,
+                        "Failed to parse TTS config file; using defaults"
+                    ),
+                }
+            }
+        }
+
         data
     }
 
@@ -217,6 +239,14 @@ impl Data {
             let cfg = self.lavalink.config().await;
             let lavalink_yaml = serde_yaml::to_string(&cfg)?;
             tokio::fs::write(LAVALINK_FILE, lavalink_yaml).await?;
+        }
+
+        #[cfg(feature = "tts")]
+        {
+            const TTS_FILE: &str = "config/tts.yaml";
+            let cfg = self.tts.config().await;
+            let yaml = serde_yaml::to_string(&cfg)?;
+            tokio::fs::write(TTS_FILE, yaml).await?;
         }
 
         Ok(())
