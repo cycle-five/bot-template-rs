@@ -131,6 +131,9 @@ pub async fn join(
     #[channel_types("Voice")]
     channel_id: Option<serenity::ChannelId>,
 ) -> Result<(), Error> {
+    // Native songbird's join() waits for the full driver/websocket handshake
+    // (can exceed 10s). Lavalink's path is faster but still worth deferring.
+    ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
     join_voice(&ctx, guild_id, channel_id).await?;
     Ok(())
@@ -139,6 +142,7 @@ pub async fn join(
 /// Leave the current voice channel.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
     ctx.data()
         .music
