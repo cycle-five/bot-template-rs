@@ -1,8 +1,10 @@
 mod commands;
 mod data;
 mod handlers;
+#[cfg(feature = "lavalink")]
 mod lavalink;
 mod logging;
+#[cfg(feature = "music")]
 mod music;
 mod reply;
 mod status;
@@ -11,8 +13,9 @@ use std::env;
 
 use poise::serenity_prelude::{self as serenity};
 use serenity::GatewayIntents;
+#[cfg(feature = "lavalink")]
 use songbird::SerenityInit;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 // Customize these constants for your bot
 pub const BOT_NAME: &str = "bot_template_rs";
@@ -45,19 +48,24 @@ async fn async_main() -> Result<(), Error> {
     // Configure the Poise framework
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![
-                commands::ping(),
-                status::status(),
-                lavalink::lavalink(),
-                music::join(),
-                music::leave(),
-                music::play(),
-                music::stop(),
-                music::pause(),
-                music::resume(),
-                music::skip(),
-                music::queue(),
-            ],
+            commands: {
+                #[allow(unused_mut)]
+                let mut v = vec![commands::ping(), status::status()];
+                #[cfg(feature = "lavalink")]
+                v.push(lavalink::lavalink());
+                #[cfg(feature = "music")]
+                v.extend([
+                    music::join(),
+                    music::leave(),
+                    music::play(),
+                    music::stop(),
+                    music::pause(),
+                    music::resume(),
+                    music::skip(),
+                    music::queue(),
+                ]);
+                v
+            },
             pre_command: |ctx| {
                 Box::pin(async move {
                     // Log the start of command execution
@@ -92,13 +100,16 @@ async fn async_main() -> Result<(), Error> {
 
                 // Try to bring up Lavalink on startup. Failure is non-fatal -
                 // admins can always reconnect via `/lavalink connect` later.
+                #[cfg(feature = "lavalink")]
                 if let Err(e) = lavalink::connect(&data, ready.user.id).await {
-                    warn!(
+                    tracing::warn!(
                         target: "bot_template_rs::lavalink",
                         error = %e,
                         "Lavalink connection failed at startup; use /lavalink connect to retry"
                     );
                 }
+                #[cfg(not(feature = "lavalink"))]
+                let _ = ready;
 
                 Ok(data)
             })
@@ -106,13 +117,16 @@ async fn async_main() -> Result<(), Error> {
         .build();
 
     // Configure the Serenity client
-    // | GatewayIntents::MESSAGE_CONTENT
-    let intents = GatewayIntents::non_privileged()
-        | GatewayIntents::GUILD_VOICE_STATES;
-    let mut client = serenity::ClientBuilder::new(token, intents)
+    let intents = GatewayIntents::non_privileged();
+    #[cfg(feature = "music")]
+    let intents = intents | GatewayIntents::GUILD_VOICE_STATES;
+
+    let client_builder = serenity::ClientBuilder::new(token, intents)
         .event_handler(handlers::Handler)
-        .framework(framework)
-        .register_songbird()
+        .framework(framework);
+    #[cfg(feature = "lavalink")]
+    let client_builder = client_builder.register_songbird();
+    let mut client = client_builder
         .await
         .expect("Failed to create client");
 

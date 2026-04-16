@@ -19,8 +19,11 @@ use crate::{Context, Error};
 /// deletes the slot's previous message (if any) before posting the new one.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Slot {
+    #[cfg(feature = "music")]
     NowPlaying,
+    #[cfg(feature = "music")]
     QueueView,
+    #[cfg(feature = "music")]
     Status,
     BotStatus,
     Generic(Cow<'static, str>),
@@ -48,6 +51,7 @@ pub struct Reply {
     delete_invoker: bool,
 }
 
+#[allow(dead_code)]
 impl Reply {
     #[must_use]
     pub fn new() -> Self {
@@ -79,7 +83,6 @@ impl Reply {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn auto_delete(mut self, d: Duration) -> Self {
         self.auto_delete = Some(d);
         self

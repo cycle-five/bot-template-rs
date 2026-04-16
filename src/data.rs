@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+#[cfg(feature = "lavalink")]
 use lavalink_rs::client::LavalinkClient;
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "lavalink")]
 use tokio::sync::RwLock;
+#[cfg(feature = "lavalink")]
 use tracing::warn;
 
 use crate::reply::{Slot, TrackedMessage};
@@ -23,6 +26,7 @@ pub struct GuildConfig {
 ///
 /// All fields may be updated at runtime via bot commands and then persisted
 /// to the config directory.
+#[cfg(feature = "lavalink")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LavalinkConfig {
     /// Hostname (including port) for the Lavalink node, e.g. `localhost:2333`.
@@ -33,6 +37,7 @@ pub struct LavalinkConfig {
     pub is_ssl: bool,
 }
 
+#[cfg(feature = "lavalink")]
 impl Default for LavalinkConfig {
     fn default() -> Self {
         Self {
@@ -43,6 +48,7 @@ impl Default for LavalinkConfig {
     }
 }
 
+#[cfg(feature = "lavalink")]
 impl LavalinkConfig {
     /// Build a config from `LAVALINK_HOST`, `LAVALINK_PASSWORD`, and
     /// `LAVALINK_SSL` environment variables, falling back to defaults for
@@ -70,6 +76,7 @@ pub struct Data {
     // Cache from the bot's context, you'll probably need this for some commands
     pub cache: Arc<serenity::Cache>,
     /// The Lavalink connection configuration. Mutable at runtime.
+    #[cfg(feature = "lavalink")]
     pub lavalink_config: Arc<RwLock<LavalinkConfig>>,
     /// The active Lavalink client, if connected.
     ///
@@ -77,6 +84,7 @@ pub struct Data {
     /// Updating `lavalink_config` does not replace an existing client or
     /// re-establish the connection in place; applying a new configuration to an
     /// already-connected client currently requires restarting the bot.
+    #[cfg(feature = "lavalink")]
     pub lavalink: Arc<RwLock<Option<LavalinkClient>>>,
     /// Live bot-sent messages tracked per (guild, slot) for the
     /// replace-previous behavior. In-memory only; not persisted.
@@ -108,7 +116,9 @@ impl Data {
         Self {
             guild_configs: dashmap::DashMap::new(),
             cache: Arc::new(serenity::Cache::default()),
+            #[cfg(feature = "lavalink")]
             lavalink_config: Arc::new(RwLock::new(LavalinkConfig::from_env())),
+            #[cfg(feature = "lavalink")]
             lavalink: Arc::new(RwLock::new(None)),
             tracked_messages: Arc::new(dashmap::DashMap::new()),
             started_at: Utc::now(),
@@ -122,7 +132,6 @@ impl Data {
     /// empty Data instance with default settings.
     pub async fn load() -> Self {
         const CONFIG_FILE: &str = "config/bot_config.yaml";
-        const LAVALINK_FILE: &str = "config/lavalink.yaml";
 
         // Create a new empty Data instance
         let data = Self::new();
@@ -140,25 +149,29 @@ impl Data {
         }
 
         // Load Lavalink configuration if present
-        match tokio::fs::read_to_string(LAVALINK_FILE).await {
-            Ok(file_content) => match serde_yaml::from_str::<LavalinkConfig>(&file_content) {
-                Ok(config) => {
-                    *data.lavalink_config.write().await = config;
-                }
+        #[cfg(feature = "lavalink")]
+        {
+            const LAVALINK_FILE: &str = "config/lavalink.yaml";
+            match tokio::fs::read_to_string(LAVALINK_FILE).await {
+                Ok(file_content) => match serde_yaml::from_str::<LavalinkConfig>(&file_content) {
+                    Ok(config) => {
+                        *data.lavalink_config.write().await = config;
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "bot_template_rs::data",
+                            error = %e,
+                            "Failed to parse Lavalink config file; using defaults"
+                        );
+                    }
+                },
                 Err(e) => {
                     warn!(
                         target: "bot_template_rs::data",
                         error = %e,
-                        "Failed to parse Lavalink config file; using defaults"
+                        "Failed to read Lavalink config file; using defaults"
                     );
                 }
-            },
-            Err(e) => {
-                warn!(
-                    target: "bot_template_rs::data",
-                    error = %e,
-                    "Failed to read Lavalink config file; using defaults"
-                );
             }
         }
 
@@ -180,7 +193,6 @@ impl Data {
     pub async fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         const CONFIG_DIR: &str = "config";
         const CONFIG_FILE: &str = "config/bot_config.yaml";
-        const LAVALINK_FILE: &str = "config/lavalink.yaml";
 
         // Create the config directory if it doesn't exist
         if !std::path::Path::new(CONFIG_DIR).exists() {
@@ -200,8 +212,12 @@ impl Data {
         tokio::fs::write(CONFIG_FILE, yaml).await?;
 
         // Persist the Lavalink configuration
-        let lavalink_yaml = serde_yaml::to_string(&*self.lavalink_config.read().await)?;
-        tokio::fs::write(LAVALINK_FILE, lavalink_yaml).await?;
+        #[cfg(feature = "lavalink")]
+        {
+            const LAVALINK_FILE: &str = "config/lavalink.yaml";
+            let lavalink_yaml = serde_yaml::to_string(&*self.lavalink_config.read().await)?;
+            tokio::fs::write(LAVALINK_FILE, lavalink_yaml).await?;
+        }
 
         Ok(())
     }
@@ -217,6 +233,7 @@ mod tests {
         let data = Data::new();
         assert_eq!(data.guild_configs.len(), 0);
         assert!(data.cache.guilds().is_empty());
+        #[cfg(feature = "lavalink")]
         assert!(data.lavalink.read().await.is_none());
     }
 
@@ -227,6 +244,7 @@ mod tests {
         assert!(config.music_channel_id.is_none());
     }
 
+    #[cfg(feature = "lavalink")]
     #[test]
     fn test_lavalink_config_default() {
         let config = LavalinkConfig::default();
@@ -261,6 +279,7 @@ mod tests {
         assert_eq!(deserialized.music_channel_id, Some(67890));
     }
 
+    #[cfg(feature = "lavalink")]
     #[test]
     fn test_lavalink_config_serialization() {
         let config = LavalinkConfig {

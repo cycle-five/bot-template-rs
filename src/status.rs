@@ -53,8 +53,14 @@ pub async fn status(
     out.push_str(&format!("built: `{build_ts}`\n"));
     out.push_str(&format!("uptime: `{uptime}`\n"));
 
-    let lavalink_connected = data.lavalink.read().await.is_some();
-    out.push_str(&format!("lavalink: `{}`\n", if lavalink_connected { "connected" } else { "disconnected" }));
+    #[cfg(feature = "lavalink")]
+    {
+        let lavalink_connected = data.lavalink.read().await.is_some();
+        out.push_str(&format!(
+            "lavalink: `{}`\n",
+            if lavalink_connected { "connected" } else { "disconnected" }
+        ));
+    }
 
     if verbose {
         let rustc = option_env!("BUILD_RUSTC_VERSION").unwrap_or("unknown");
@@ -68,22 +74,6 @@ pub async fn status(
         let configured_guilds = data.guild_configs.len();
         let started_at = data.started_at.to_rfc3339();
 
-        let lava_cfg = data.lavalink_config.read().await.clone();
-        let lava_host = lava_cfg.hostname;
-        let lava_ssl = lava_cfg.is_ssl;
-
-        let lava_node_count = if let Some(client) = data.lavalink.read().await.as_ref() {
-            // Count nodes by probing successive indices. lavalink-rs doesn't
-            // expose a direct `len()`, so this is the portable approach.
-            let mut n = 0usize;
-            while client.get_node_by_index(n).is_some() {
-                n += 1;
-            }
-            n
-        } else {
-            0
-        };
-
         out.push_str("\n**Build**\n");
         out.push_str(&format!("rustc: `{rustc}`\n"));
         out.push_str(&format!("profile: `{profile}`\n"));
@@ -96,10 +86,29 @@ pub async fn status(
         out.push_str(&format!("guild count (cache): `{guild_count}`\n"));
         out.push_str(&format!("configured guilds: `{configured_guilds}`\n"));
 
-        out.push_str("\n**Lavalink**\n");
-        out.push_str(&format!("host: `{lava_host}`\n"));
-        out.push_str(&format!("ssl: `{lava_ssl}`\n"));
-        out.push_str(&format!("active nodes: `{lava_node_count}`\n"));
+        #[cfg(feature = "lavalink")]
+        {
+            let lava_cfg = data.lavalink_config.read().await.clone();
+            let lava_host = lava_cfg.hostname;
+            let lava_ssl = lava_cfg.is_ssl;
+
+            let lava_node_count = if let Some(client) = data.lavalink.read().await.as_ref() {
+                // Count nodes by probing successive indices. lavalink-rs doesn't
+                // expose a direct `len()`, so this is the portable approach.
+                let mut n = 0usize;
+                while client.get_node_by_index(n).is_some() {
+                    n += 1;
+                }
+                n
+            } else {
+                0
+            };
+
+            out.push_str("\n**Lavalink**\n");
+            out.push_str(&format!("host: `{lava_host}`\n"));
+            out.push_str(&format!("ssl: `{lava_ssl}`\n"));
+            out.push_str(&format!("active nodes: `{lava_node_count}`\n"));
+        }
     }
 
     reply::send(

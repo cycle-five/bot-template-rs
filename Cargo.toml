@@ -18,7 +18,7 @@ tokio = { version = "1.51.1", features = [
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
 dotenvy = "0.15"
 
 # Logging and tracing
@@ -27,18 +27,27 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 
-# Voice / music
+# Voice / music (optional, gated by `music` and `lavalink` features)
 songbird = { version = "0.5", default-features = false, features = [
   "gateway",
   "serenity",
   "native",
-] }
+], optional = true }
 lavalink-rs = { version = "0.15", default-features = false, features = [
   "songbird",
   "serenity",
   "tungstenite-native-tls",
   "macros",
-] }
+], optional = true }
 
 [dev-dependencies]
 mockall = "0.14.0"
+
+[features]
+default = ["music", "lavalink"]
+# High-level music commands (/play, /queue, etc.). Currently requires the
+# `lavalink` backend; a future `music-native` feature could add a songbird +
+# yt-dlp + ffmpeg backend behind a shared MusicBackend trait.
+music = ["lavalink", "dep:serde_json"]
+# Lavalink client plus admin commands (/lavalink show/set/connect).
+lavalink = ["dep:lavalink-rs", "dep:songbird"]
