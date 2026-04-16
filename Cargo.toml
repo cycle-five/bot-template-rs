@@ -24,6 +24,13 @@ async-trait = { version = "0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = [
   "native-tls",
 ], optional = true }
+# Declared directly so we can enable the container/codec features songbird's
+# native driver needs to probe yt-dlp's output (WebM/MKV, Ogg, etc.). Cargo
+# feature unification forwards these into songbird's own use of symphonia.
+symphonia = { version = "0.5", default-features = false, features = [
+  "all-formats",
+  "all-codecs",
+], optional = true }
 
 # Logging and tracing
 tracing = "0.1"
@@ -75,6 +82,7 @@ native = [
   "songbird/builtin-queue",
   "songbird/tungstenite",
   "dep:reqwest",
+  "dep:symphonia",
 ]
 
 # --- User feature bundles ---
