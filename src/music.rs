@@ -158,6 +158,11 @@ pub async fn play(
     #[rest]
     term: Option<String>,
 ) -> Result<(), Error> {
+    // Extend Discord's 3s interaction deadline to 15m — yt-dlp/lavalink
+    // resolves can easily exceed the default window on playlist URLs or
+    // slow searches. No-op for prefix commands.
+    ctx.defer().await?;
+
     let guild_id = ctx.guild_id().ok_or("guild only")?;
     let backend = ctx.data().music.clone();
 

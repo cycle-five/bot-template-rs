@@ -245,6 +245,7 @@ pub async fn save(
     #[rest]
     name: String,
 ) -> Result<(), Error> {
+    ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
     let backend = ctx.data().music.clone();
     let store = ctx.data().playlists.clone();
@@ -290,6 +291,8 @@ pub async fn load(
     #[rest]
     name: String,
 ) -> Result<(), Error> {
+    // Multi-track resolution can take tens of seconds; extend the deadline.
+    ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
     let backend = ctx.data().music.clone();
     let store = ctx.data().playlists.clone();
