@@ -8,6 +8,8 @@ mod logging;
 mod music;
 #[cfg(feature = "music-core")]
 mod music_backend;
+#[cfg(feature = "native")]
+mod native_backend;
 #[cfg(feature = "playlists")]
 mod playlist;
 mod reply;

@@ -12,6 +12,8 @@ pub use crate::lavalink::LavalinkConfig;
 use crate::lavalink::LavalinkBackend;
 #[cfg(feature = "music-core")]
 use crate::music_backend::MusicBackend;
+#[cfg(feature = "native")]
+use crate::native_backend::NativeBackend;
 #[cfg(feature = "playlists")]
 use crate::playlist::{PlaylistStore, YamlPlaylistStore};
 use crate::reply::{Slot, TrackedMessage};
@@ -77,13 +79,34 @@ impl Data {
     pub fn new() -> Self {
         #[cfg(feature = "lavalink")]
         let lavalink = Arc::new(LavalinkBackend::new(LavalinkConfig::from_env()));
+        #[cfg(feature = "native")]
+        let native = Arc::new(NativeBackend::new());
+
+        // Backend selection: when both are compiled in, honor the
+        // `MUSIC_BACKEND` env var (lavalink|native); default to lavalink for
+        // historical-default reasons.
+        #[cfg(all(feature = "music-core", feature = "lavalink", feature = "native"))]
+        let music: Arc<dyn MusicBackend> = match std::env::var("MUSIC_BACKEND")
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Ok("native") => native.clone() as Arc<dyn MusicBackend>,
+            _ => lavalink.clone() as Arc<dyn MusicBackend>,
+        };
+        #[cfg(all(feature = "music-core", feature = "lavalink", not(feature = "native")))]
+        let music: Arc<dyn MusicBackend> = lavalink.clone() as Arc<dyn MusicBackend>;
+        #[cfg(all(feature = "music-core", feature = "native", not(feature = "lavalink")))]
+        let music: Arc<dyn MusicBackend> = native.clone() as Arc<dyn MusicBackend>;
+
         Self {
             guild_configs: dashmap::DashMap::new(),
             cache: Arc::new(serenity::Cache::default()),
             #[cfg(feature = "lavalink")]
             lavalink: lavalink.clone(),
-            #[cfg(all(feature = "music-core", feature = "lavalink"))]
-            music: lavalink.clone() as Arc<dyn MusicBackend>,
+            #[cfg(feature = "music-core")]
+            music,
             #[cfg(feature = "playlists")]
             playlists: Arc::new(YamlPlaylistStore::new("config/playlists")) as Arc<dyn PlaylistStore>,
             tracked_messages: Arc::new(dashmap::DashMap::new()),

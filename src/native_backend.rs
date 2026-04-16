@@ -1,0 +1,286 @@
+//! Native [`MusicBackend`]: decodes and plays audio in-process via songbird's
+//! driver.
+//!
+//! # Current state
+//!
+//! Resolves tracks through [`songbird::input::YoutubeDl`], which shells out
+//! to the `yt-dlp` binary (must be on PATH). Track metadata (title, author,
+//! duration, source URL) is pulled up-front via `aux_metadata` so the user
+//! sees what was queued before playback starts.
+//!
+//! # TODO: pure-Rust extraction
+//!
+//! Port [cracktunes](https://github.com/cycle-five/cracktunes)' `rusty_ytdl`-
+//! based `Compose` implementation so the common path doesn't need yt-dlp on
+//! disk. Keep yt-dlp as a fallback for sites rusty_ytdl can't handle.
+//!
+//! # Known limitations (v1)
+//!
+//! `now_playing`/`queue_snapshot` metadata isn't refreshed when songbird
+//! auto-advances on track-end — the display lags the driver. Fixing this
+//! needs a `TrackEvent::End` handler that pops our parallel metadata list.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use dashmap::DashMap;
+use poise::serenity_prelude as serenity;
+use serenity::{ChannelId, GuildId, UserId};
+use songbird::Songbird;
+use songbird::input::{Input, YoutubeDl};
+use tokio::sync::{Mutex, RwLock};
+
+use crate::Error;
+use crate::music_backend::{MusicBackend, PlayResult, Track};
+
+#[derive(Default)]
+struct GuildMeta {
+    /// Parallel metadata for queued tracks (positions match songbird's queue
+    /// order, minus the current track). `now_playing` holds the head.
+    queue: Vec<Track>,
+    now_playing: Option<Track>,
+}
+
+/// Native backend: native playback via songbird + yt-dlp for resolution.
+pub struct NativeBackend {
+    http: reqwest::Client,
+    songbird: Arc<RwLock<Option<Arc<Songbird>>>>,
+    meta: Arc<DashMap<GuildId, Arc<Mutex<GuildMeta>>>>,
+}
+
+impl Default for NativeBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NativeBackend {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            songbird: Arc::new(RwLock::new(None)),
+            meta: Arc::new(DashMap::new()),
+        }
+    }
+
+    async fn songbird(&self) -> Result<Arc<Songbird>, Error> {
+        self.songbird
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| "songbird not initialized; backend not ready".into())
+    }
+
+    fn guild_meta(&self, guild: GuildId) -> Arc<Mutex<GuildMeta>> {
+        self.meta
+            .entry(guild)
+            .or_insert_with(|| Arc::new(Mutex::new(GuildMeta::default())))
+            .clone()
+    }
+}
+
+async fn track_from_youtube_dl(
+    src: &mut YoutubeDl<'_>,
+    fallback_title: &str,
+    requester: UserId,
+) -> Track {
+    use songbird::input::Compose;
+    let meta: Option<songbird::input::AuxMetadata> = src.aux_metadata().await.ok();
+    Track {
+        title: meta
+            .as_ref()
+            .and_then(|m| m.title.clone())
+            .unwrap_or_else(|| fallback_title.to_string()),
+        author: meta
+            .as_ref()
+            .and_then(|m| m.artist.clone())
+            .unwrap_or_else(|| "Unknown".into()),
+        uri: meta.as_ref().and_then(|m| m.source_url.clone()),
+        duration_ms: meta
+            .as_ref()
+            .and_then(|m| m.duration)
+            .map(|d: std::time::Duration| d.as_millis() as u64),
+        requester: Some(requester.get()),
+    }
+}
+
+#[async_trait]
+impl MusicBackend for NativeBackend {
+    async fn on_ready(
+        &self,
+        ctx: &serenity::Context,
+        _user_id: UserId,
+    ) -> Result<(), Error> {
+        let manager = songbird::get(ctx)
+            .await
+            .ok_or("songbird not registered")?
+            .clone();
+        *self.songbird.write().await = Some(manager);
+        Ok(())
+    }
+
+    async fn ensure_joined(
+        &self,
+        ctx: &serenity::Context,
+        guild: GuildId,
+        channel: ChannelId,
+    ) -> Result<bool, Error> {
+        let manager = songbird::get(ctx)
+            .await
+            .ok_or("songbird not registered")?
+            .clone();
+        if manager.get(guild).is_some() {
+            return Ok(false);
+        }
+        manager.join(guild, channel).await?;
+        Ok(true)
+    }
+
+    async fn leave(
+        &self,
+        ctx: &serenity::Context,
+        guild: GuildId,
+    ) -> Result<(), Error> {
+        let manager = songbird::get(ctx)
+            .await
+            .ok_or("songbird not registered")?
+            .clone();
+        if manager.get(guild).is_some() {
+            manager.remove(guild).await?;
+        }
+        self.meta.remove(&guild);
+        Ok(())
+    }
+
+    async fn play(
+        &self,
+        guild: GuildId,
+        query: &str,
+        requester: UserId,
+    ) -> Result<PlayResult, Error> {
+        let manager = self.songbird().await?;
+        let call = manager.get(guild).ok_or("not in voice")?;
+
+        let mut src = if query.starts_with("http") {
+            YoutubeDl::new(self.http.clone(), query.to_string())
+        } else {
+            YoutubeDl::new_search(self.http.clone(), query.to_string())
+        };
+        let track = track_from_youtube_dl(&mut src, query, requester).await;
+
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+
+        let mut handler = call.lock().await;
+        let _handle = handler.enqueue_input(Input::from(src)).await;
+        let queue_len = handler.queue().current_queue().len();
+        drop(handler);
+
+        // songbird auto-starts playback when enqueueing into an empty queue.
+        if queue_len == 1 {
+            meta.now_playing = Some(track.clone());
+        } else {
+            meta.queue.push(track.clone());
+        }
+
+        Ok(PlayResult::Added(track))
+    }
+
+    async fn skip(&self, guild: GuildId) -> Result<Option<Track>, Error> {
+        let manager = self.songbird().await?;
+        let call = manager.get(guild).ok_or("not in voice")?;
+
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+        let skipped = meta.now_playing.take();
+
+        let handler = call.lock().await;
+        let _ = handler.queue().skip();
+        drop(handler);
+
+        if !meta.queue.is_empty() {
+            meta.now_playing = Some(meta.queue.remove(0));
+        }
+        Ok(skipped)
+    }
+
+    async fn stop(&self, guild: GuildId) -> Result<Option<Track>, Error> {
+        let manager = self.songbird().await?;
+        let call = manager.get(guild).ok_or("not in voice")?;
+
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+        let stopped = meta.now_playing.take();
+
+        let handler = call.lock().await;
+        handler.queue().stop();
+        drop(handler);
+
+        meta.queue.clear();
+        Ok(stopped)
+    }
+
+    async fn pause(&self, guild: GuildId) -> Result<(), Error> {
+        let manager = self.songbird().await?;
+        let call = manager.get(guild).ok_or("not in voice")?;
+        let handler = call.lock().await;
+        handler.queue().pause()?;
+        Ok(())
+    }
+
+    async fn resume(&self, guild: GuildId) -> Result<(), Error> {
+        let manager = self.songbird().await?;
+        let call = manager.get(guild).ok_or("not in voice")?;
+        let handler = call.lock().await;
+        handler.queue().resume()?;
+        Ok(())
+    }
+
+    async fn now_playing(&self, guild: GuildId) -> Result<Option<Track>, Error> {
+        let meta_arc = self.guild_meta(guild);
+        let meta = meta_arc.lock().await;
+        Ok(meta.now_playing.clone())
+    }
+
+    async fn queue_snapshot(&self, guild: GuildId) -> Result<Vec<Track>, Error> {
+        let meta_arc = self.guild_meta(guild);
+        let meta = meta_arc.lock().await;
+        Ok(meta.queue.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn new_backend_has_no_guild_state() {
+        let b = NativeBackend::new();
+        // No guild state until a guild is touched.
+        assert_eq!(b.meta.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn guild_meta_is_lazily_created() {
+        let b = NativeBackend::new();
+        let g = GuildId::new(1);
+        let m1 = b.guild_meta(g);
+        let m2 = b.guild_meta(g);
+        assert!(Arc::ptr_eq(&m1, &m2), "same guild reuses the same Arc");
+        assert_eq!(b.meta.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn queue_snapshot_on_fresh_guild_is_empty() {
+        let b = NativeBackend::new();
+        let g = GuildId::new(1);
+        assert!(b.queue_snapshot(g).await.unwrap().is_empty());
+        assert!(b.now_playing(g).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn backend_is_dyn_compatible() {
+        fn _assert(_: &Arc<dyn MusicBackend>) {}
+    }
+}
