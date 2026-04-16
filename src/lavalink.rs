@@ -223,8 +223,16 @@ impl MusicBackend for LavalinkBackend {
             return Ok(false);
         }
 
-        let (connection_info, _) = manager.join_gateway(guild, channel).await?;
-        lava.create_player_context(guild, connection_info).await?;
+        let (sb_info, _) = manager.join_gateway(guild, channel).await?;
+        // lavalink-rs's `songbird` feature is disabled to avoid a second
+        // songbird version in the tree, so we convert manually.
+        let lava_info = lavalink_rs::model::player::ConnectionInfo {
+            endpoint: sb_info.endpoint,
+            token: sb_info.token,
+            session_id: sb_info.session_id,
+            channel_id: Some(lavalink_rs::model::ChannelId(sb_info.channel_id.0.get())),
+        };
+        lava.create_player_context(guild, lava_info).await?;
         Ok(true)
     }
 
