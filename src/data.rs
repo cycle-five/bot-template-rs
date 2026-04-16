@@ -12,6 +12,8 @@ pub use crate::lavalink::LavalinkConfig;
 use crate::lavalink::LavalinkBackend;
 #[cfg(feature = "music-core")]
 use crate::music_backend::MusicBackend;
+#[cfg(feature = "playlists")]
+use crate::playlist::{PlaylistStore, YamlPlaylistStore};
 use crate::reply::{Slot, TrackedMessage};
 
 /// Guild configuration structure.
@@ -42,6 +44,10 @@ pub struct Data {
     /// point at a `NativeBackend` instead.
     #[cfg(feature = "music-core")]
     pub music: Arc<dyn MusicBackend>,
+    /// User-owned playlist persistence. Decoupled from the music backend via
+    /// the [`PlaylistStore`] trait.
+    #[cfg(feature = "playlists")]
+    pub playlists: Arc<dyn PlaylistStore>,
     /// Live bot-sent messages tracked per (guild, slot) for the
     /// replace-previous behavior. In-memory only; not persisted.
     pub tracked_messages: Arc<dashmap::DashMap<(serenity::GuildId, Slot), TrackedMessage>>,
@@ -78,6 +84,8 @@ impl Data {
             lavalink: lavalink.clone(),
             #[cfg(all(feature = "music-core", feature = "lavalink"))]
             music: lavalink.clone() as Arc<dyn MusicBackend>,
+            #[cfg(feature = "playlists")]
+            playlists: Arc::new(YamlPlaylistStore::new("config/playlists")) as Arc<dyn PlaylistStore>,
             tracked_messages: Arc::new(dashmap::DashMap::new()),
             started_at: Utc::now(),
         }

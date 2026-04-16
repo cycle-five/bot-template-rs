@@ -43,6 +43,7 @@ lavalink-rs = { version = "0.15", default-features = false, features = [
 
 [dev-dependencies]
 mockall = "0.14.0"
+tempfile = "3"
 
 [features]
 default = ["music", "lavalink"]
@@ -55,3 +56,6 @@ music-core = ["dep:async-trait"]
 music = ["music-core", "lavalink", "dep:serde_json"]
 # Lavalink client plus admin commands (/lavalink show/set/connect).
 lavalink = ["dep:lavalink-rs", "dep:songbird"]
+# User-owned playlists: save/load/list/feature. Persists to YAML files via
+# the PlaylistStore trait; alternative stores (SQLite, etc.) can slot in.
+playlists = ["music-core"]

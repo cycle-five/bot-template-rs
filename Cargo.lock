@@ -116,6 +116,7 @@ dependencies = [
  "serde_yaml",
  "serenity",
  "songbird",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-appender",

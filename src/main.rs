@@ -8,6 +8,8 @@ mod logging;
 mod music;
 #[cfg(feature = "music-core")]
 mod music_backend;
+#[cfg(feature = "playlists")]
+mod playlist;
 mod reply;
 mod status;
 
@@ -66,6 +68,8 @@ async fn async_main() -> Result<(), Error> {
                     music::skip(),
                     music::queue(),
                 ]);
+                #[cfg(feature = "playlists")]
+                v.push(playlist::playlist());
                 v
             },
             pre_command: |ctx| {
