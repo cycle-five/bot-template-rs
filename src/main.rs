@@ -106,8 +106,8 @@ async fn async_main() -> Result<(), Error> {
         .build();
 
     // Configure the Serenity client
+    // | GatewayIntents::MESSAGE_CONTENT
     let intents = GatewayIntents::non_privileged()
-        | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILD_VOICE_STATES;
     let mut client = serenity::ClientBuilder::new(token, intents)
         .event_handler(handlers::Handler)

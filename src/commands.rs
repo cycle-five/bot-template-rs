@@ -18,7 +18,7 @@ mod tests {
     fn test_ping_command_definition() {
         let cmd = ping();
         assert_eq!(cmd.name, "ping");
-        assert!(cmd.description.unwrap_or_else(Default::default).contains("check if the bot is responsive"));
+        assert!(cmd.description.unwrap_or_default().contains("check if the bot is responsive"));
         assert!(cmd.guild_only);
     }
 

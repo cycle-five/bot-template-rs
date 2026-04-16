@@ -139,6 +139,21 @@ impl Data {
         }
 
         // Load Lavalink configuration if present
+        match tokio::fs::read_to_string(LAVALINK_FILE).await {
+            Ok(file_content) => {
+                match serde_yaml::from_str::<LavalinkConfig>(&file_content) {
+                    Ok(config) => {
+                        *data.lavalink_config.write().await = config;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to parse Lavalink config file: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read Lavalink config file: {e}");
+            }
+        }
         if let Ok(file_content) = tokio::fs::read_to_string(LAVALINK_FILE).await {
             if let Ok(config) = serde_yaml::from_str::<LavalinkConfig>(&file_content) {
                 *data.lavalink_config.write().await = config;
