@@ -12,7 +12,7 @@ use std::env;
 use poise::serenity_prelude::{self as serenity};
 use serenity::GatewayIntents;
 use songbird::SerenityInit;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 // Customize these constants for your bot
 pub const BOT_NAME: &str = "bot_template_rs";
@@ -124,7 +124,7 @@ async fn async_main() -> Result<(), Error> {
     tokio::select! {
         result = client_handle => {
             if let Err(err) = result {
-                eprintln!("Error running the bot: {err}");
+                error!(target: ERROR_TARGET, error = %err, "Bot runtime error");
             }
         }
         _ = tokio::signal::ctrl_c() => {
@@ -135,7 +135,7 @@ async fn async_main() -> Result<(), Error> {
     // Save data before shutting down
     info!("Saving bot data...");
     if let Err(err) = data_clone.save().await {
-        eprintln!("Error saving bot data: {err}");
+        error!(target: ERROR_TARGET, error = %err, "Error saving bot data");
     }
 
     info!("Bot shutdown complete");

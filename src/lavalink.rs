@@ -1,6 +1,7 @@
 //! Lavalink client lifecycle and runtime configuration commands.
 
 use crate::data::LavalinkConfig;
+use crate::reply::{self, Reply};
 use crate::{Context, Data, Error};
 
 use lavalink_rs::model::events;
@@ -80,14 +81,21 @@ pub async fn show(ctx: Context<'_>) -> Result<(), Error> {
     let cfg = ctx.data().lavalink_config.read().await.clone();
     let connected = ctx.data().lavalink.read().await.is_some();
     let redacted = if cfg.password.is_empty() { "(empty)" } else { "***" };
-    ctx.say(format!(
+    let body = format!(
         "**Lavalink config**\n\
          hostname: `{}`\n\
          ssl: `{}`\n\
          password: `{}`\n\
          connected: `{}`",
         cfg.hostname, cfg.is_ssl, redacted, connected
-    ))
+    );
+    reply::send(
+        &ctx,
+        Reply::new()
+            .content(body)
+            .ephemeral(true)
+            .delete_invoker(true),
+    )
     .await?;
     Ok(())
 }
@@ -117,13 +125,25 @@ pub async fn set(
     }
 
     if let Err(e) = ctx.data().save().await {
-        ctx.say(format!("Updated in-memory but failed to persist config: {e}"))
-            .await?;
+        reply::send(
+            &ctx,
+            Reply::new()
+                .content(format!("Updated in-memory but failed to persist config: {e}"))
+                .ephemeral(true)
+                .delete_invoker(true),
+        )
+        .await?;
         return Ok(());
     }
 
-    ctx.say("Lavalink config updated. Restart the bot to apply.")
-        .await?;
+    reply::send(
+        &ctx,
+        Reply::new()
+            .content("Lavalink config updated. Restart the bot to apply.")
+            .ephemeral(true)
+            .delete_invoker(true),
+    )
+    .await?;
     Ok(())
 }
 
@@ -136,22 +156,32 @@ pub async fn set(
 #[poise::command(slash_command, prefix_command, rename = "connect")]
 pub async fn connect_cmd(ctx: Context<'_>) -> Result<(), Error> {
     if ctx.data().lavalink.read().await.is_some() {
-        ctx.say(
-            "Lavalink is already connected. Restart the bot to apply configuration changes.",
+        reply::send(
+            &ctx,
+            Reply::new()
+                .content(
+                    "Lavalink is already connected. Restart the bot to apply configuration changes.",
+                )
+                .ephemeral(true)
+                .delete_invoker(true),
         )
         .await?;
         return Ok(());
     }
 
     let user_id = ctx.serenity_context().cache.current_user().id;
-    match connect(ctx.data(), user_id).await {
-        Ok(()) => {
-            ctx.say("Connected to Lavalink.").await?;
-        }
-        Err(e) => {
-            ctx.say(format!("Failed to connect: {e}")).await?;
-        }
-    }
+    let body = match connect(ctx.data(), user_id).await {
+        Ok(()) => "Connected to Lavalink.".to_string(),
+        Err(e) => format!("Failed to connect: {e}"),
+    };
+    reply::send(
+        &ctx,
+        Reply::new()
+            .content(body)
+            .ephemeral(true)
+            .delete_invoker(true),
+    )
+    .await?;
     Ok(())
 }
 

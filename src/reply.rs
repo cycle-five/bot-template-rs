@@ -22,6 +22,7 @@ pub enum Slot {
     NowPlaying,
     QueueView,
     Status,
+    BotStatus,
     Generic(Cow<'static, str>),
 }
 

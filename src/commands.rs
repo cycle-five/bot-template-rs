@@ -1,11 +1,12 @@
-use crate::{Data, Error};
-use poise::{Context, command};
+use crate::reply::{self, Reply};
+use crate::{Context, Error};
+use poise::command;
 
 /// Basic ping command
 /// This command is used to check if the bot is responsive.
 #[command(prefix_command, slash_command, guild_only)]
-pub async fn ping(ctx: Context<'_, Data, Error>) -> Result<(), Error> {
-    ctx.say("Pong!").await?;
+pub async fn ping(ctx: Context<'_>) -> Result<(), Error> {
+    reply::send(&ctx, Reply::new().content("Pong!")).await?;
     Ok(())
 }
 

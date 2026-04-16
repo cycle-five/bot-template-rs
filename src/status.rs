@@ -1,5 +1,6 @@
 //! The `status` command: build & runtime information for the bot.
 
+use crate::reply::{self, Reply, Slot};
 use crate::{Context, Error};
 
 use chrono::{DateTime, Utc};
@@ -101,7 +102,14 @@ pub async fn status(
         out.push_str(&format!("active nodes: `{lava_node_count}`\n"));
     }
 
-    ctx.say(out).await?;
+    reply::send(
+        &ctx,
+        Reply::new()
+            .content(out)
+            .slot(Slot::BotStatus)
+            .delete_invoker(true),
+    )
+    .await?;
     Ok(())
 }
 

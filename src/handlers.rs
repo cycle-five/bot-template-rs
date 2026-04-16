@@ -1,3 +1,4 @@
+use crate::EVENT_TARGET;
 use poise::serenity_prelude::{self as serenity, Context, EventHandler, Guild, GuildId, Ready};
 use tracing::{info, warn};
 
@@ -11,7 +12,11 @@ impl EventHandler for Handler {
         let shard_id = ctx.shard_id;
         let ready_guild_count = ready.guilds.len();
         info!(
-            "Connected as {user_name}, shard {shard_id}, ready payload lists {ready_guild_count} guild(s)"
+            target: EVENT_TARGET,
+            user = %user_name,
+            shard = %shard_id,
+            guild_count = ready_guild_count,
+            "Bot connected (ready payload)"
         );
     }
 
@@ -21,19 +26,27 @@ impl EventHandler for Handler {
         let guild_count = guilds.len();
         if guild_count != guild_count_cache {
             warn!(
-                "Cache guild count mismatch: {guild_count_cache} (cache) vs {guild_count} (actual)"
+                target: EVENT_TARGET,
+                cache_count = guild_count_cache,
+                payload_count = guild_count,
+                "Cache guild count mismatch"
             );
         }
-        info!("Cache ready! The bot is in {guild_count} guild(s)");
+        info!(
+            target: EVENT_TARGET,
+            guild_count = guild_count,
+            "Cache ready"
+        );
     }
 
     async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
         info!(
-            "guild_create: id={} name={} is_new={:?} cache_size_now={}",
-            guild.id,
-            guild.name,
-            is_new,
-            ctx.cache.guild_count()
+            target: EVENT_TARGET,
+            guild_id = %guild.id,
+            guild_name = %guild.name,
+            is_new = ?is_new,
+            cache_size = ctx.cache.guild_count(),
+            "guild_create"
         );
     }
 }
