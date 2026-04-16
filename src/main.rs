@@ -19,7 +19,7 @@ use std::env;
 
 use poise::serenity_prelude::{self as serenity};
 use serenity::GatewayIntents;
-#[cfg(feature = "lavalink")]
+#[cfg(feature = "voice")]
 use songbird::SerenityInit;
 use tracing::{error, info};
 
@@ -132,7 +132,7 @@ async fn async_main() -> Result<(), Error> {
     let client_builder = serenity::ClientBuilder::new(token, intents)
         .event_handler(handlers::Handler)
         .framework(framework);
-    #[cfg(feature = "lavalink")]
+    #[cfg(feature = "voice")]
     let client_builder = client_builder.register_songbird();
     let mut client = client_builder
         .await
