@@ -76,17 +76,19 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-// Store command start time in a thread-local variable
-thread_local! {
-    static COMMAND_START_TIME: std::cell::RefCell<Option<Instant>> = const { std::cell::RefCell::new(None) };
+// Per-invocation command start times, keyed by poise's context id. This
+// survives tokio moving the pre/post_command futures between worker threads
+// (the original thread-local setup observed as duration_ms=0 in production).
+static COMMAND_START_TIMES: std::sync::OnceLock<dashmap::DashMap<u64, Instant>> =
+    std::sync::OnceLock::new();
+
+fn start_times() -> &'static dashmap::DashMap<u64, Instant> {
+    COMMAND_START_TIMES.get_or_init(dashmap::DashMap::new)
 }
 
 /// Log the start of a command execution (pre-command hook)
 pub fn log_command_start(ctx: Context<'_, Data, Error>) {
-    // Store the start time for later use in post_command
-    COMMAND_START_TIME.with(|cell| {
-        *cell.borrow_mut() = Some(Instant::now());
-    });
+    start_times().insert(ctx.id(), Instant::now());
 
     let command_name = ctx.command().qualified_name.clone();
     let guild_id = ctx
@@ -117,8 +119,7 @@ pub fn log_command_start(ctx: Context<'_, Data, Error>) {
 /// Log the end of a command execution (post-command hook)
 pub fn log_command_end(ctx: Context<'_, Data, Error>) {
     // Calculate execution time
-    let duration =
-        COMMAND_START_TIME.with(|cell| cell.borrow_mut().take().map(|start| start.elapsed()));
+    let duration = start_times().remove(&ctx.id()).map(|(_, start)| start.elapsed());
 
     let command_name = ctx.command().qualified_name.clone();
     let guild_id = ctx
@@ -232,12 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn test_thread_local_command_start_time() {
-        // Test that the thread local variable can be accessed
-        COMMAND_START_TIME.with(|cell| {
-            assert!(cell.borrow().is_none());
-            *cell.borrow_mut() = Some(Instant::now());
-            assert!(cell.borrow().is_some());
-        });
+    fn command_start_times_round_trip() {
+        let id: u64 = 1234;
+        start_times().insert(id, Instant::now());
+        let elapsed = start_times().remove(&id).map(|(_, t)| t.elapsed());
+        assert!(elapsed.is_some());
+        assert!(start_times().remove(&id).is_none(), "entry should be removed");
     }
 }
