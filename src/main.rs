@@ -6,6 +6,8 @@ mod lavalink;
 mod logging;
 #[cfg(feature = "music")]
 mod music;
+#[cfg(feature = "music-core")]
+mod music_backend;
 mod reply;
 mod status;
 
@@ -98,17 +100,17 @@ async fn async_main() -> Result<(), Error> {
                 );
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
 
-                // Try to bring up Lavalink on startup. Failure is non-fatal -
-                // admins can always reconnect via `/lavalink connect` later.
-                #[cfg(feature = "lavalink")]
-                if let Err(e) = lavalink::connect(&data, ready.user.id).await {
+                // Fire the backend's on_ready lifecycle hook (Lavalink opens
+                // its control-plane connection here). Failure is non-fatal.
+                #[cfg(feature = "music-core")]
+                if let Err(e) = data.music.on_ready(ctx, ready.user.id).await {
                     tracing::warn!(
-                        target: "bot_template_rs::lavalink",
+                        target: "bot_template_rs::music",
                         error = %e,
-                        "Lavalink connection failed at startup; use /lavalink connect to retry"
+                        "music backend on_ready failed"
                     );
                 }
-                #[cfg(not(feature = "lavalink"))]
+                #[cfg(not(feature = "music-core"))]
                 let _ = ready;
 
                 Ok(data)

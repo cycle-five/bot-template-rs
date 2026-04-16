@@ -20,6 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = { version = "1.0", optional = true }
 dotenvy = "0.15"
+async-trait = { version = "0.1", optional = true }
 
 # Logging and tracing
 tracing = "0.1"
@@ -45,9 +46,12 @@ mockall = "0.14.0"
 
 [features]
 default = ["music", "lavalink"]
-# High-level music commands (/play, /queue, etc.). Currently requires the
-# `lavalink` backend; a future `music-native` feature could add a songbird +
-# yt-dlp + ffmpeg backend behind a shared MusicBackend trait.
-music = ["lavalink", "dep:serde_json"]
+# Internal marker: compiles the backend-agnostic music module and trait.
+# Users typically enable `music` instead.
+music-core = ["dep:async-trait"]
+# High-level music commands (/play, /queue, etc.) with the Lavalink backend.
+# A future `music-native` feature would add a songbird + yt-dlp + ffmpeg
+# backend behind the same MusicBackend trait.
+music = ["music-core", "lavalink", "dep:serde_json"]
 # Lavalink client plus admin commands (/lavalink show/set/connect).
 lavalink = ["dep:lavalink-rs", "dep:songbird"]

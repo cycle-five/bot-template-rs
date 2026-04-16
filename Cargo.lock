@@ -104,6 +104,7 @@ dependencies = [
 name = "bot-template-rs"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "dashmap 6.1.0",
  "dotenvy",

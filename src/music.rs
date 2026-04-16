@@ -1,27 +1,35 @@
-//! Music commands backed by a Lavalink node.
+//! Backend-agnostic music commands.
 //!
-//! All commands require that a Lavalink client has been successfully connected
-//! (see [`crate::lavalink`]). They share a common helper, [`_join`], to ensure
-//! the bot is in a voice channel before attempting playback operations.
+//! All commands dispatch through [`crate::music_backend::MusicBackend`] via
+//! `ctx.data().music`. Backend-specific state and protocol details live in
+//! the backend impl (e.g. [`crate::lavalink::LavalinkBackend`]).
 //!
 //! User-facing replies go through [`crate::reply`] so the music control panel
 //! collapses to a single live message per slot (`NowPlaying`, `QueueView`,
 //! `Status`) and the invoker's prefix message is cleaned up when possible.
 
+use crate::music_backend::{PlayResult, Track};
 use crate::reply::{self, Reply, Slot};
 use crate::{Context, Error};
 
-use lavalink_rs::prelude::*;
 use poise::serenity_prelude as serenity;
 use serenity::{CreateEmbed, Mentionable};
 
 const MUSIC_EMBED_COLOR: u32 = 0x1DB954;
+const QUEUE_MAX_SHOWN: usize = 10;
 
 fn music_embed(title: impl Into<String>, description: impl Into<String>) -> CreateEmbed {
     CreateEmbed::new()
         .title(title)
         .description(description)
         .color(MUSIC_EMBED_COLOR)
+}
+
+fn track_line(t: &Track) -> String {
+    match &t.uri {
+        Some(uri) => format!("[{} — {}](<{}>)", t.author, t.title, uri),
+        None => format!("{} — {}", t.author, t.title),
+    }
 }
 
 async fn status(
@@ -53,78 +61,56 @@ async fn now_playing(ctx: &Context<'_>, embed: CreateEmbed) -> Result<(), Error>
     Ok(())
 }
 
-/// Internal helper: ensure the bot is connected to a voice channel and has a
-/// player context registered with Lavalink. Returns `true` if a new connection
-/// was established.
-async fn _join(
+/// Resolve the voice channel to join: the explicit override, or the channel
+/// the invoker is currently in.
+fn resolve_target_channel(
     ctx: &Context<'_>,
     guild_id: serenity::GuildId,
-    channel_id: Option<serenity::ChannelId>,
-) -> Result<bool, Error> {
-    let lava_client = {
-        let guard = ctx.data().lavalink.read().await;
-        match guard.as_ref() {
-            Some(c) => c.clone(),
-            None => {
-                status(
-                    ctx,
-                    "Lavalink is not connected. Ask an admin to run `/lavalink connect`.",
-                    true,
-                )
-                .await?;
-                return Err("lavalink not connected".into());
-            }
-        }
+    explicit: Option<serenity::ChannelId>,
+) -> Option<serenity::ChannelId> {
+    if let Some(c) = explicit {
+        return Some(c);
+    }
+    let cache = &ctx.serenity_context().cache;
+    let author_id = ctx.author().id;
+    cache.guild(guild_id).and_then(|g| {
+        g.voice_states
+            .get(&author_id)
+            .and_then(|vs| vs.channel_id)
+    })
+}
+
+/// Join helper: resolves the target channel, then asks the backend to join.
+async fn join_voice(
+    ctx: &Context<'_>,
+    guild_id: serenity::GuildId,
+    explicit: Option<serenity::ChannelId>,
+) -> Result<Option<serenity::ChannelId>, Error> {
+    let backend = ctx.data().music.clone();
+    let Some(channel) = resolve_target_channel(ctx, guild_id, explicit) else {
+        status(
+            ctx,
+            "You're not in a voice channel. Join one first, or pass a channel explicitly.",
+            true,
+        )
+        .await?;
+        return Err("Not in a voice channel".into());
     };
-
-    let manager = songbird::get(ctx.serenity_context())
+    match backend
+        .ensure_joined(ctx.serenity_context(), guild_id, channel)
         .await
-        .ok_or("songbird not registered")?
-        .clone();
-
-    if lava_client.get_player_context(guild_id).is_none() {
-        let connect_to = match channel_id {
-            Some(x) => x,
-            None => {
-                let cache = &ctx.serenity_context().cache;
-                let author_id = ctx.author().id;
-                let lookup = cache.guild(guild_id).and_then(|g| {
-                    g.voice_states
-                        .get(&author_id)
-                        .and_then(|vs| vs.channel_id)
-                });
-
-                match lookup {
-                    Some(channel) => channel,
-                    None => {
-                        status(
-                            ctx,
-                            "You're not in a voice channel. Join one first, or pass a channel explicitly.",
-                            true,
-                        )
-                        .await?;
-                        return Err("Not in a voice channel".into());
-                    }
-                }
+    {
+        Ok(newly_joined) => {
+            if newly_joined {
+                status(ctx, format!("Joined {}", channel.mention()), false).await?;
             }
-        };
-
-        match manager.join_gateway(guild_id, connect_to).await {
-            Ok((connection_info, _)) => {
-                lava_client
-                    .create_player_context(guild_id, connection_info)
-                    .await?;
-                status(ctx, format!("Joined {}", connect_to.mention()), false).await?;
-                return Ok(true);
-            }
-            Err(why) => {
-                status(ctx, format!("Error joining the channel: {why}"), true).await?;
-                return Err(why.into());
-            }
+            Ok(Some(channel))
+        }
+        Err(why) => {
+            status(ctx, format!("Error joining the channel: {why}"), true).await?;
+            Err(why)
         }
     }
-
-    Ok(false)
 }
 
 /// Join the voice channel you're in (or a specific one).
@@ -136,7 +122,7 @@ pub async fn join(
     channel_id: Option<serenity::ChannelId>,
 ) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
-    _join(&ctx, guild_id, channel_id).await?;
+    join_voice(&ctx, guild_id, channel_id).await?;
     Ok(())
 }
 
@@ -144,20 +130,10 @@ pub async fn join(
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
-
-    let manager = songbird::get(ctx.serenity_context())
-        .await
-        .ok_or("songbird not registered")?
-        .clone();
-
-    if let Some(lava_client) = ctx.data().lavalink.read().await.clone() {
-        let _ = lava_client.delete_player(guild_id).await;
-    }
-
-    if manager.get(guild_id).is_some() {
-        manager.remove(guild_id).await?;
-    }
-
+    ctx.data()
+        .music
+        .leave(ctx.serenity_context(), guild_id)
+        .await?;
     status(&ctx, "Left voice channel.", false).await?;
     Ok(())
 }
@@ -173,113 +149,51 @@ pub async fn play(
     term: Option<String>,
 ) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let backend = ctx.data().music.clone();
 
-    _join(&ctx, guild_id, None).await?;
-
-    let lava_client = ctx
-        .data()
-        .lavalink
-        .read()
-        .await
-        .clone()
-        .ok_or("lavalink not connected")?;
-
-    let Some(player) = lava_client.get_player_context(guild_id) else {
-        status(&ctx, "Join the bot to a voice channel first.", true).await?;
+    // Ensure the bot is in voice before doing anything.
+    if join_voice(&ctx, guild_id, None).await?.is_none() {
         return Ok(());
-    };
+    }
 
-    let query = if let Some(term) = term {
-        if term.starts_with("http") {
-            term
-        } else {
-            match SearchEngines::YouTube.to_query(&term) {
-                Ok(q) => q,
-                Err(why) => {
-                    status(&ctx, format!("Error processing search term: {why}"), true).await?;
-                    return Err(why.into());
-                }
-            }
-        }
-    } else {
-        if let Ok(player_data) = player.get_player().await {
-            let queue = player.get_queue();
-
-            if player_data.track.is_none()
-                && queue.get_track(0).await.is_ok_and(|x| x.is_some())
-            {
-                player.skip()?;
-            } else {
+    let Some(query) = term else {
+        // No argument: resume if paused, then advance if idle.
+        backend.resume(guild_id).await.ok();
+        let np = backend.now_playing(guild_id).await?;
+        let queue = backend.queue_snapshot(guild_id).await?;
+        if np.is_none() {
+            if queue.is_empty() {
                 status(&ctx, "The queue is empty.", true).await?;
+            } else {
+                backend.skip(guild_id).await?;
             }
         }
         return Ok(());
     };
 
-    let loaded_tracks = match lava_client.load_tracks(guild_id, &query).await {
-        Ok(x) => x,
+    let result = match backend
+        .play(guild_id, &query, ctx.author().id)
+        .await
+    {
+        Ok(r) => r,
         Err(why) => {
             status(&ctx, format!("Error loading track: {why}"), true).await?;
-            return Err(why.into());
+            return Err(why);
         }
     };
 
-    let mut playlist_info = None;
-
-    let mut tracks: Vec<TrackInQueue> = match loaded_tracks.data {
-        Some(TrackLoadData::Track(x)) => vec![x.into()],
-        Some(TrackLoadData::Search(x)) => {
-            let Some(first) = x.first() else {
-                status(&ctx, format!("No results for `{query}`"), true).await?;
-                return Ok(());
-            };
-            vec![first.clone().into()]
-        }
-        Some(TrackLoadData::Playlist(x)) => {
-            playlist_info = Some(x.info);
-            x.tracks.iter().map(|x| x.clone().into()).collect()
-        }
-        _ => {
+    let announcement = match result {
+        PlayResult::Added(t) => music_embed("Added to queue", track_line(&t)),
+        PlayResult::Playlist { name, count, .. } => music_embed(
+            "Added playlist to queue",
+            format!("**{name}** — {count} track(s)"),
+        ),
+        PlayResult::NoMatch => {
             status(&ctx, format!("No results for `{query}`"), true).await?;
             return Ok(());
         }
     };
-
-    let announcement = if let Some(info) = playlist_info {
-        music_embed(
-            "Added playlist to queue",
-            format!("**{}** — {} track(s)", info.name, tracks.len()),
-        )
-    } else {
-        let track = &tracks[0].track;
-        let body = if let Some(uri) = &track.info.uri {
-            format!("[{} — {}](<{}>)", track.info.author, track.info.title, uri)
-        } else {
-            format!("{} — {}", track.info.author, track.info.title)
-        };
-        music_embed("Added to queue", body)
-    };
     now_playing(&ctx, announcement).await?;
-
-    for i in &mut tracks {
-        i.track.user_data = Some(serde_json::json!({"requester_id": ctx.author().id.get()}));
-    }
-
-    let queue = player.get_queue();
-    queue.append(tracks.into())?;
-
-    match player.get_player().await {
-        Ok(player_data) => {
-            if player_data.track.is_none() && queue.get_track(0).await.is_ok_and(|x| x.is_some()) {
-                player.skip()?;
-            }
-        }
-        Err(why) => {
-            status(&ctx, format!("Error getting player data: {why}"), true).await?;
-            return Err(why.into());
-        }
-    };
-
     Ok(())
 }
 
@@ -287,25 +201,10 @@ pub async fn play(
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
-    let lava_client = ctx
-        .data()
-        .lavalink
-        .read()
-        .await
-        .clone()
-        .ok_or("lavalink not connected")?;
-
-    let Some(player) = lava_client.get_player_context(guild_id) else {
-        status(&ctx, "Join the bot to a voice channel first.", true).await?;
-        return Ok(());
-    };
-
-    let np = player.get_player().await?.track;
-    if let Some(np) = np {
-        player.stop_now().await?;
-        now_playing(&ctx, music_embed("Stopped", np.info.title)).await?;
-    } else {
-        status(&ctx, "Nothing to stop.", true).await?;
+    let stopped = ctx.data().music.stop(guild_id).await?;
+    match stopped {
+        Some(t) => now_playing(&ctx, music_embed("Stopped", t.title)).await?,
+        None => status(&ctx, "Nothing to stop.", true).await?,
     }
     Ok(())
 }
@@ -314,20 +213,7 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
-    let lava_client = ctx
-        .data()
-        .lavalink
-        .read()
-        .await
-        .clone()
-        .ok_or("lavalink not connected")?;
-
-    let Some(player) = lava_client.get_player_context(guild_id) else {
-        status(&ctx, "Join the bot to a voice channel first.", true).await?;
-        return Ok(());
-    };
-
-    player.set_pause(true).await?;
+    ctx.data().music.pause(guild_id).await?;
     now_playing(&ctx, music_embed("Paused", "⏸")).await?;
     Ok(())
 }
@@ -336,20 +222,7 @@ pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
-    let lava_client = ctx
-        .data()
-        .lavalink
-        .read()
-        .await
-        .clone()
-        .ok_or("lavalink not connected")?;
-
-    let Some(player) = lava_client.get_player_context(guild_id) else {
-        status(&ctx, "Join the bot to a voice channel first.", true).await?;
-        return Ok(());
-    };
-
-    player.set_pause(false).await?;
+    ctx.data().music.resume(guild_id).await?;
     now_playing(&ctx, music_embed("Resumed", "▶")).await?;
     Ok(())
 }
@@ -358,25 +231,10 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
-    let lava_client = ctx
-        .data()
-        .lavalink
-        .read()
-        .await
-        .clone()
-        .ok_or("lavalink not connected")?;
-
-    let Some(player) = lava_client.get_player_context(guild_id) else {
-        status(&ctx, "Join the bot to a voice channel first.", true).await?;
-        return Ok(());
-    };
-
-    let np = player.get_player().await?.track;
-    if let Some(np) = np {
-        player.skip()?;
-        now_playing(&ctx, music_embed("Skipped", np.info.title)).await?;
-    } else {
-        status(&ctx, "Nothing to skip.", true).await?;
+    let skipped = ctx.data().music.skip(guild_id).await?;
+    match skipped {
+        Some(t) => now_playing(&ctx, music_embed("Skipped", t.title)).await?,
+        None => status(&ctx, "Nothing to skip.", true).await?,
     }
     Ok(())
 }
@@ -384,35 +242,15 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
 /// Show the current queue: what's playing now and the next tracks in line.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
-    const MAX_SHOWN: usize = 10;
-
     let guild_id = ctx.guild_id().ok_or("guild only")?;
-    let lava_client = ctx
-        .data()
-        .lavalink
-        .read()
-        .await
-        .clone()
-        .ok_or("lavalink not connected")?;
+    let backend = ctx.data().music.clone();
 
-    let Some(player) = lava_client.get_player_context(guild_id) else {
-        status(&ctx, "Nothing is playing.", true).await?;
-        return Ok(());
-    };
-
-    let np = player.get_player().await?.track;
-    let queue_tracks = player.get_queue().get_queue().await?;
-    let total = queue_tracks.len();
+    let np = backend.now_playing(guild_id).await?;
+    let tracks = backend.queue_snapshot(guild_id).await?;
+    let total = tracks.len();
 
     let np_line = match np {
-        Some(np) => {
-            let info = &np.info;
-            if let Some(uri) = &info.uri {
-                format!("[{} — {}](<{}>)", info.author, info.title, uri)
-            } else {
-                format!("{} — {}", info.author, info.title)
-            }
-        }
+        Some(t) => track_line(&t),
         None => "_nothing_".to_string(),
     };
 
@@ -421,17 +259,11 @@ pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
         body.push_str("\nQueue is empty.");
     } else {
         body.push_str(&format!("\n**Up next ({total} track(s)):**\n"));
-        for (i, item) in queue_tracks.iter().take(MAX_SHOWN).enumerate() {
-            let info = &item.track.info;
-            let line = if let Some(uri) = &info.uri {
-                format!("{}. [{} — {}](<{}>)\n", i + 1, info.author, info.title, uri)
-            } else {
-                format!("{}. {} — {}\n", i + 1, info.author, info.title)
-            };
-            body.push_str(&line);
+        for (i, t) in tracks.iter().take(QUEUE_MAX_SHOWN).enumerate() {
+            body.push_str(&format!("{}. {}\n", i + 1, track_line(t)));
         }
-        if total > MAX_SHOWN {
-            body.push_str(&format!("…and {} more", total - MAX_SHOWN));
+        if total > QUEUE_MAX_SHOWN {
+            body.push_str(&format!("…and {} more", total - QUEUE_MAX_SHOWN));
         }
     }
 
@@ -463,5 +295,23 @@ mod tests {
 
         assert!(play().guild_only);
         assert!(skip().guild_only);
+    }
+
+    #[test]
+    fn track_line_formats_with_and_without_uri() {
+        let t1 = Track {
+            title: "T".into(),
+            author: "A".into(),
+            uri: Some("https://x".into()),
+            duration_ms: None,
+            requester: None,
+        };
+        assert_eq!(track_line(&t1), "[A — T](<https://x>)");
+
+        let t2 = Track {
+            uri: None,
+            ..t1
+        };
+        assert_eq!(track_line(&t2), "A — T");
     }
 }
