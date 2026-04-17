@@ -17,7 +17,7 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
-ARG FEATURES="music music-native playlists record tts"
+ARG FEATURES="music music-native playlists record tts stt"
 # git is needed by build.rs (commit-hash stamp); cmake/pkg-config/libssl-dev
 # satisfy transitive C dependencies pulled in by a few crates.
 RUN apt-get update \

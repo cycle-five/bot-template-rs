@@ -20,6 +20,7 @@ src/
 ├── playlist.rs           # PlaylistStore trait + YAML impl + /playlist
 ├── record.rs             # voice capture → per-user Ogg → zip
 ├── tts.rs                # TtsClient + /tts commands
+├── stt.rs                # SttBackend trait + HTTP impl + /stt commands
 └── audio_http.rs         # AudioStore + axum server for URL-relay to lavalink
 ```
 
@@ -42,6 +43,7 @@ playlists        = music-core
 voice-recv       = voice + songbird/{driver, receive, tungstenite}
 record           = voice-recv + dep:ogg + dep:zip
 tts              = native + dep:axum
+stt              = record + dep:reqwest + dep:serde_json
 ```
 
 `music` and `music-native` are composable. With both on, `MUSIC_BACKEND`
@@ -150,6 +152,32 @@ On the native backend, TTS stays on the simpler bytes path: synthesize,
 `enqueue_input(Input::from(bytes))` — no HTTP server needed.
 
 The branch lives in `tts::speak`, keyed on `ctx.data().music.kind()`.
+
+## Speech-to-text
+
+Gated by the `stt` feature. The trait abstraction (`SttBackend`) gives us a
+seam to add non-OpenAI-shape providers later, but for now there's one impl:
+`HttpSttBackend`, which speaks the OpenAI `/v1/audio/transcriptions` wire
+contract. That single implementation covers:
+
+- **API providers**: OpenAI, [lemonfox.ai](https://lemonfox.ai), Groq,
+  Fireworks, DeepInfra — all speak the same multipart format.
+- **Self-hosted**: [Speaches](https://github.com/speaches-ai/speaches)
+  (`ghcr.io/speaches-ai/speaches`) — runs `faster-whisper` behind the same
+  OpenAI contract. Bundled as an optional compose service under the `stt`
+  profile.
+
+Switching providers is an `STT_BASE_URL` / `STT_API_KEY` / `STT_MODEL`
+change, not a rebuild. Config persists to `config/stt.yaml` and is
+runtime-mutable via `/stt set`.
+
+`/stt transcribe` accepts any Discord-supported audio attachment
+(wav/mp3/ogg-opus/m4a/flac/webm — exactly the formats Whisper accepts, and
+conveniently a superset of what `/record` produces). Long transcripts get
+truncated-inline with a `.txt` attachment for the full text, so Discord's
+2000-char content limit doesn't clip real conversations. The
+`transcribe_message` context-menu variant (`Apps → Transcribe attachment`)
+provides the same flow for messages already in the channel.
 
 ## Voice recording
 

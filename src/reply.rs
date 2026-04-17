@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use poise::CreateReply;
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateEmbed, Http, MessageId};
+use serenity::{ChannelId, CreateAttachment, CreateEmbed, Http, MessageId};
 use tracing::debug;
 
 use crate::{Context, Error};
@@ -45,6 +45,7 @@ impl TrackedMessage {
 pub struct Reply {
     content: Option<String>,
     embeds: Vec<CreateEmbed>,
+    attachments: Vec<CreateAttachment>,
     ephemeral: bool,
     slot: Option<Slot>,
     auto_delete: Option<Duration>,
@@ -67,6 +68,12 @@ impl Reply {
     #[must_use]
     pub fn embed(mut self, e: CreateEmbed) -> Self {
         self.embeds.push(e);
+        self
+    }
+
+    #[must_use]
+    pub fn attachment(mut self, a: CreateAttachment) -> Self {
+        self.attachments.push(a);
         self
     }
 
@@ -160,6 +167,9 @@ pub async fn send(
     }
     for e in reply.embeds {
         create = create.embed(e);
+    }
+    for a in reply.attachments {
+        create = create.attachment(a);
     }
 
     let handle = ctx.send(create).await?;

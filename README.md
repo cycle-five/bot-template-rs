@@ -19,6 +19,7 @@ command-only bot or the whole kitchen sink.
 | User playlists (YAML-persisted) | `playlists` | `/playlist save|load|list|delete|feature` |
 | Per-user voice recording | `record` | Opus-in-Ogg writers, zipped on `/record stop` |
 | Text-to-speech | `tts` | via [GnomedDev/tts-service](https://github.com/GnomedDev/tts-service) |
+| Speech-to-text | `stt` | any OpenAI-compatible provider (lemonfox, OpenAI, Groq, self-hosted [Speaches](https://github.com/speaches-ai/speaches)) |
 
 Both music backends can be compiled in simultaneously; `MUSIC_BACKEND=native|lavalink`
 picks at startup. TTS works with either — it takes a URL-relay path through
@@ -72,6 +73,7 @@ All config is via env vars; `.env` is loaded on startup if present.
 | `MUSIC_BACKEND` | no | `lavalink` or `native` when both are compiled in |
 | `LAVALINK_HOST` / `LAVALINK_PASSWORD` / `LAVALINK_SSL` | lavalink builds | node coordinates |
 | `TTS_SERVICE_URL` + other `TTS_*` | tts builds | tts-service endpoint + defaults |
+| `STT_BASE_URL` / `STT_API_KEY` / `STT_MODEL` / `STT_LANGUAGE` | stt builds | OpenAI-compatible STT endpoint |
 | `BOT_PUBLIC_URL` / `BOT_HTTP_BIND_ADDR` / `BOT_AUDIO_TTL_SECS` | tts on lavalink | public hostname for the embedded audio server |
 | `RUST_LOG` | no | tracing filter |
 
@@ -96,6 +98,8 @@ Subject to feature flags:
 /playlist save|load|list|delete|featured|feature
 /record start|stop|disable|enable
 /tts speak|show|set|voices
+/stt transcribe|show|set     # transcribe via any OpenAI-compatible provider
+                             # also: "Apps → Transcribe attachment" on a message
 /lavalink show|set|connect   # admin: runtime lavalink config
 ```
 

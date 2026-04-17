@@ -21,6 +21,8 @@ mod playlist;
 mod record;
 mod reply;
 mod status;
+#[cfg(feature = "stt")]
+mod stt;
 #[cfg(feature = "tts")]
 mod tts;
 
@@ -86,6 +88,11 @@ async fn async_main() -> Result<(), Error> {
                 v.push(record::record());
                 #[cfg(feature = "tts")]
                 v.push(tts::tts());
+                #[cfg(feature = "stt")]
+                {
+                    v.push(stt::stt());
+                    v.push(stt::transcribe_message());
+                }
                 v
             },
             pre_command: |ctx| {

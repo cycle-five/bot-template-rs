@@ -24,6 +24,7 @@ async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = [
   "native-tls",
   "json",
+  "multipart",
 ], optional = true }
 # Declared directly so we can enable the container/codec features songbird's
 # native driver needs to probe yt-dlp's output (WebM/MKV, Ogg, etc.). Cargo
@@ -119,3 +120,8 @@ tts = ["native", "dep:axum"]
 # Works alongside either playback backend since receive and playback are
 # independent concerns at the songbird layer.
 record = ["voice-recv", "dep:ogg", "dep:zip"]
+# Speech-to-text via any OpenAI-compatible `/v1/audio/transcriptions`
+# endpoint — lemonfox.ai, OpenAI, Groq, Fireworks, or a self-hosted
+# `ghcr.io/speaches-ai/speaches` sidecar. Provider is picked at runtime
+# via env/config, no separate compile-time backend needed.
+stt = ["record", "dep:reqwest", "dep:serde_json"]

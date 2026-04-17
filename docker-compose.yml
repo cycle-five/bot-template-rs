@@ -14,6 +14,22 @@
 # your own `lavalink:` service and point LAVALINK_HOST at it.
 
 services:
+  # Speech-to-text sidecar (OpenAI-compatible Whisper server). Off by default;
+  # start with: `docker compose --profile stt up`. Use the CUDA image instead
+  # of CPU if you have an Nvidia GPU passed through. Models are cached in the
+  # `speaches-models` volume after first download.
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    profiles: ["stt"]
+    environment:
+      # Speaches honors HF_HOME for its model cache.
+      HF_HOME: /data/huggingface
+    volumes:
+      - speaches-models:/data
+    restart: unless-stopped
+    expose:
+      - "8000"
+
   tts-service:
     # Layered on top of gnomeddev/tts-service:latest; see Dockerfile.tts
     # for why the gcloud dummy key is baked in rather than mounted.
@@ -36,7 +52,7 @@ services:
     build:
       context: .
       args:
-        FEATURES: ${BOT_FEATURES:-music music-native playlists record tts}
+        FEATURES: ${BOT_FEATURES:-music music-native playlists record tts stt}
     depends_on:
       - tts-service
     env_file:
@@ -64,6 +80,10 @@ services:
       TTS_MAX_LENGTH: ${TTS_MAX_LENGTH:-200}
       TTS_PREFERRED_FORMAT: ${TTS_PREFERRED_FORMAT:-wav}
       TTS_AUTH_KEY: ${TTS_AUTH_KEY:-}
+      STT_BASE_URL: ${STT_BASE_URL:-http://speaches:8000/v1}
+      STT_API_KEY: ${STT_API_KEY:-}
+      STT_MODEL: ${STT_MODEL:-whisper-1}
+      STT_LANGUAGE: ${STT_LANGUAGE:-}
       RUST_LOG: ${RUST_LOG:-bot_template_rs=debug,lavalink_rs=info,serenity=warn}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -78,3 +98,6 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+
+volumes:
+  speaches-models:

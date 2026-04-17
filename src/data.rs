@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "lavalink", feature = "tts"))]
+#[cfg(any(feature = "lavalink", feature = "tts", feature = "stt"))]
 use tracing::warn;
 
 #[cfg(feature = "lavalink")]
@@ -21,6 +21,8 @@ use crate::record::RecordingSession;
 use crate::reply::{Slot, TrackedMessage};
 #[cfg(feature = "tts")]
 use crate::audio_http::AudioStore;
+#[cfg(feature = "stt")]
+use crate::stt::{HttpSttBackend, SttConfig};
 #[cfg(feature = "tts")]
 use crate::tts::{TtsClient, TtsConfig};
 
@@ -85,6 +87,10 @@ pub struct Data {
     /// to hand synthesized audio URLs to the lavalink node.
     #[cfg(feature = "tts")]
     pub audio_store: Arc<AudioStore>,
+    /// STT client — any OpenAI-compatible provider. Runtime-mutable config
+    /// via `/stt set`; persists to `config/stt.yaml`.
+    #[cfg(feature = "stt")]
+    pub stt: Arc<HttpSttBackend>,
     /// Live bot-sent messages tracked per (guild, slot) for the
     /// replace-previous behavior. In-memory only; not persisted.
     pub tracked_messages: Arc<dashmap::DashMap<(serenity::GuildId, Slot), TrackedMessage>>,
@@ -148,6 +154,8 @@ impl Data {
             recordings: Arc::new(dashmap::DashMap::new()),
             #[cfg(feature = "tts")]
             tts: Arc::new(TtsClient::new(TtsConfig::from_env())),
+            #[cfg(feature = "stt")]
+            stt: Arc::new(HttpSttBackend::new(SttConfig::from_env())),
             #[cfg(feature = "tts")]
             audio_store: {
                 let public_url = std::env::var("BOT_PUBLIC_URL").ok().filter(|s| !s.is_empty());
@@ -224,6 +232,21 @@ impl Data {
             }
         }
 
+        #[cfg(feature = "stt")]
+        {
+            const STT_FILE: &str = "config/stt.yaml";
+            if let Ok(content) = tokio::fs::read_to_string(STT_FILE).await {
+                match serde_yaml::from_str::<SttConfig>(&content) {
+                    Ok(cfg) => data.stt.set_config(cfg).await,
+                    Err(e) => warn!(
+                        target: "bot_template_rs::data",
+                        error = %e,
+                        "Failed to parse STT config file; using defaults"
+                    ),
+                }
+            }
+        }
+
         data
     }
 
@@ -265,6 +288,14 @@ impl Data {
             let cfg = self.tts.config().await;
             let yaml = serde_yaml::to_string(&cfg)?;
             tokio::fs::write(TTS_FILE, yaml).await?;
+        }
+
+        #[cfg(feature = "stt")]
+        {
+            const STT_FILE: &str = "config/stt.yaml";
+            let cfg = self.stt.config().await;
+            let yaml = serde_yaml::to_string(&cfg)?;
+            tokio::fs::write(STT_FILE, yaml).await?;
         }
 
         Ok(())
