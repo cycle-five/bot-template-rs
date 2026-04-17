@@ -47,9 +47,34 @@ services:
       TTS_SERVICE_URL: http://tts-service:3000
       # Default lavalink target if a host-side node is running.
       LAVALINK_HOST: ${LAVALINK_HOST:-host.docker.internal:2333}
+      # Pass these explicitly so remote docker contexts (where env_file
+      # shipping can be flaky) still see them. Compose expands from your
+      # local .env at parse time.
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DISCORD_DEV_GUILD: ${DISCORD_DEV_GUILD:-}
+      BOT_PUBLIC_URL: ${BOT_PUBLIC_URL:-}
+      BOT_HTTP_BIND_ADDR: ${BOT_HTTP_BIND_ADDR:-0.0.0.0:8080}
+      BOT_AUDIO_TTL_SECS: ${BOT_AUDIO_TTL_SECS:-60}
+      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:-youshallnotpass}
+      LAVALINK_SSL: ${LAVALINK_SSL:-false}
+      MUSIC_BACKEND: ${MUSIC_BACKEND:-lavalink}
+      TTS_MODE: ${TTS_MODE:-eSpeak}
+      TTS_VOICE: ${TTS_VOICE:-en}
+      TTS_SPEAKING_RATE: ${TTS_SPEAKING_RATE:-1.0}
+      TTS_MAX_LENGTH: ${TTS_MAX_LENGTH:-200}
+      TTS_PREFERRED_FORMAT: ${TTS_PREFERRED_FORMAT:-wav}
+      TTS_AUTH_KEY: ${TTS_AUTH_KEY:-}
+      RUST_LOG: ${RUST_LOG:-bot_template_rs=debug,lavalink_rs=info,serenity=warn}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./config:/app/config
       - ./logs:/app/logs
+    # Bot's HTTP layer for serving TTS audio to a remote lavalink node.
+    # Published (not just exposed) so a cloudflared instance outside this
+    # compose network — e.g. running on a sibling LXC or another host —
+    # can reach it at http://<this-host>:8080. Change "8080:8080" to
+    # "127.0.0.1:8080:8080" if you want to restrict to loopback.
+    ports:
+      - "8080:8080"
     restart: unless-stopped

@@ -1,3 +1,5 @@
+#[cfg(feature = "tts")]
+mod audio_http;
 mod commands;
 mod data;
 mod handlers;
@@ -116,7 +118,29 @@ async fn async_main() -> Result<(), Error> {
                 logging::log_console(
                     "Registering commands and return data, this will go away in the next version of poise"
                 );
-                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                // Register to DISCORD_DEV_GUILD if set (instant propagation,
+                // ideal for iterating on new commands); otherwise globally
+                // (can take up to an hour to appear).
+                match std::env::var("DISCORD_DEV_GUILD")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    Some(guild_id) => {
+                        poise::builtins::register_in_guild(
+                            ctx,
+                            &framework.options().commands,
+                            serenity::GuildId::new(guild_id),
+                        )
+                        .await?;
+                        info!(
+                            target: "bot_template_rs",
+                            guild_id, "Registered commands to dev guild"
+                        );
+                    }
+                    None => {
+                        poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                    }
+                }
 
                 // Fire the backend's on_ready lifecycle hook (Lavalink opens
                 // its control-plane connection here). Failure is non-fatal.
@@ -149,6 +173,24 @@ async fn async_main() -> Result<(), Error> {
     let mut client = client_builder
         .await
         .expect("Failed to create client");
+
+    // Spawn the audio HTTP layer if BOT_PUBLIC_URL is set. Without a public
+    // URL there's nothing for remote pullers (e.g. lavalink) to reach, so
+    // the server would just burn a port for no reason.
+    #[cfg(feature = "tts")]
+    if data_clone.audio_store.public_url().is_some() {
+        let bind = env::var("BOT_HTTP_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let store = data_clone.audio_store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = audio_http::serve(&bind, store).await {
+                error!(
+                    target: ERROR_TARGET,
+                    error = %e,
+                    "audio HTTP server exited"
+                );
+            }
+        });
+    }
 
     info!("Starting bot...");
 

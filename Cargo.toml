@@ -37,6 +37,9 @@ ogg = { version = "0.9", optional = true }
 zip = { version = "2", default-features = false, features = [
   "deflate",
 ], optional = true }
+# HTTP server for serving bot-generated audio (TTS) to external pullers
+# like the lavalink node. Only compiled in for the `tts` feature.
+axum = { version = "0.8", optional = true }
 
 # Logging and tracing
 tracing = "0.1"
@@ -109,8 +112,9 @@ voice-recv = [
 ]
 # Text-to-speech via https://github.com/GnomedDev/tts-service (HTTP microservice
 # used by https://github.com/Discord-TTS/Bot). Plays through songbird's native
-# driver — coexists with either music backend.
-tts = ["native"]
+# driver on the native backend; on lavalink, synthesized audio is served via
+# the embedded axum HTTP layer and fetched by the lavalink node.
+tts = ["native", "dep:axum"]
 # Per-user Opus-in-Ogg recording, packaged as a zip on /record stop.
 # Works alongside either playback backend since receive and playback are
 # independent concerns at the songbird layer.

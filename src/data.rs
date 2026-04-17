@@ -20,6 +20,8 @@ use crate::playlist::{PlaylistStore, YamlPlaylistStore};
 use crate::record::RecordingSession;
 use crate::reply::{Slot, TrackedMessage};
 #[cfg(feature = "tts")]
+use crate::audio_http::AudioStore;
+#[cfg(feature = "tts")]
 use crate::tts::{TtsClient, TtsConfig};
 
 /// Guild configuration structure.
@@ -79,6 +81,10 @@ pub struct Data {
     /// TTS client; config is runtime-mutable via `/tts set`.
     #[cfg(feature = "tts")]
     pub tts: Arc<TtsClient>,
+    /// In-memory audio store + served by the embedded axum HTTP layer. Used
+    /// to hand synthesized audio URLs to the lavalink node.
+    #[cfg(feature = "tts")]
+    pub audio_store: Arc<AudioStore>,
     /// Live bot-sent messages tracked per (guild, slot) for the
     /// replace-previous behavior. In-memory only; not persisted.
     pub tracked_messages: Arc<dashmap::DashMap<(serenity::GuildId, Slot), TrackedMessage>>,
@@ -142,6 +148,18 @@ impl Data {
             recordings: Arc::new(dashmap::DashMap::new()),
             #[cfg(feature = "tts")]
             tts: Arc::new(TtsClient::new(TtsConfig::from_env())),
+            #[cfg(feature = "tts")]
+            audio_store: {
+                let public_url = std::env::var("BOT_PUBLIC_URL").ok().filter(|s| !s.is_empty());
+                let ttl_secs = std::env::var("BOT_AUDIO_TTL_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(60);
+                Arc::new(AudioStore::new(
+                    public_url,
+                    std::time::Duration::from_secs(ttl_secs),
+                ))
+            },
             tracked_messages: Arc::new(dashmap::DashMap::new()),
             started_at: Utc::now(),
         }

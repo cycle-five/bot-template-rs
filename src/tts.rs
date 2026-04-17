@@ -58,6 +58,17 @@ impl Default for TtsConfig {
     }
 }
 
+fn mime_for_format(fmt: &str) -> &'static str {
+    match fmt.to_ascii_lowercase().as_str() {
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        _ => "application/octet-stream",
+    }
+}
+
 impl TtsConfig {
     /// Build from `TTS_*` env vars, falling back to defaults per field.
     #[must_use]
@@ -107,12 +118,14 @@ impl TtsClient {
         *self.config.write().await = cfg;
     }
 
-    /// Synthesize `text` and return the raw audio bytes.
+    /// Synthesize `text` and return the raw audio bytes plus the
+    /// `Content-Type` reported by tts-service (or a default inferred from
+    /// `preferred_format` if the server didn't send one).
     pub async fn synthesize(
         &self,
         text: &str,
         voice_override: Option<&str>,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<(Vec<u8>, String), Error> {
         let cfg = self.config.read().await.clone();
         let voice = voice_override.unwrap_or(&cfg.voice);
         let url = format!("{}/tts", cfg.service_url.trim_end_matches('/'));
@@ -135,7 +148,13 @@ impl TtsClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("tts-service returned {status}: {body}").into());
         }
-        Ok(resp.bytes().await?.to_vec())
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| mime_for_format(&cfg.preferred_format).to_string());
+        Ok((resp.bytes().await?.to_vec(), content_type))
     }
 
     /// Query the service for the list of available voices under the current mode.
@@ -178,29 +197,77 @@ pub async fn speak(
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
 
-    // Lavalink owns the voice UDP session, so songbird can't push TTS bytes
-    // through its mixer. Bail with an explanation rather than silently
-    // queueing audio that will never play.
+    // Lavalink path: synthesize → stash bytes in the audio store → hand
+    // lavalink the public URL via play_url. Requires BOT_PUBLIC_URL to be
+    // set and a tunnel/reverse-proxy in front of the bot's HTTP layer.
     #[cfg(feature = "music-core")]
     if matches!(
         ctx.data().music.kind(),
         crate::music_backend::BackendKind::Lavalink
     ) {
+        let Some(_) = ctx.data().audio_store.public_url() else {
+            reply::send(
+                &ctx,
+                Reply::new()
+                    .content(
+                        "TTS on the lavalink backend requires `BOT_PUBLIC_URL` \
+                         to be set to a URL lavalink can reach (e.g. a \
+                         cloudflared tunnel). Switch to `MUSIC_BACKEND=native` \
+                         to bypass this requirement.",
+                    )
+                    .ephemeral(true)
+                    .delete_invoker(true),
+            )
+            .await?;
+            return Ok(());
+        };
+
+        let (bytes, content_type) = match ctx.data().tts.synthesize(&text, None).await {
+            Ok(b) => b,
+            Err(e) => {
+                reply::send(
+                    &ctx,
+                    Reply::new()
+                        .content(format!("TTS failed: {e}"))
+                        .ephemeral(true)
+                        .delete_invoker(true),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        let (_id, url) = ctx.data().audio_store.put(bytes, content_type);
+        let url = url.expect("public_url was just asserted");
+
+        if let Err(e) = ctx
+            .data()
+            .music
+            .play_url(guild_id, &url, ctx.author().id)
+            .await
+        {
+            reply::send(
+                &ctx,
+                Reply::new()
+                    .content(format!("Lavalink refused TTS URL: {e}"))
+                    .ephemeral(true)
+                    .delete_invoker(true),
+            )
+            .await?;
+            return Ok(());
+        }
+
         reply::send(
             &ctx,
             Reply::new()
-                .content(
-                    "TTS is not supported on the lavalink music backend yet. \
-                     Switch to `MUSIC_BACKEND=native`, or wait for lavalink \
-                     URL-relay support.",
-                )
-                .ephemeral(true)
+                .content(format!("🔊 `{text}`"))
                 .delete_invoker(true),
         )
         .await?;
         return Ok(());
     }
 
+    // Native/no-music-core path: enqueue raw bytes directly onto songbird.
     let manager = songbird::get(ctx.serenity_context())
         .await
         .ok_or("songbird not registered")?
@@ -217,7 +284,7 @@ pub async fn speak(
         return Ok(());
     };
 
-    let bytes = match ctx.data().tts.synthesize(&text, None).await {
+    let (bytes, _ct) = match ctx.data().tts.synthesize(&text, None).await {
         Ok(b) => b,
         Err(e) => {
             reply::send(
