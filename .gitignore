@@ -1,2 +1,6 @@
 /target
 /logs
+.env
+secrets/
+secrets/
+secrets/

@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 #[cfg(feature = "music-core")]
-use crate::music_backend::{MusicBackend, PlayResult, Track};
+use crate::music_backend::{BackendKind, MusicBackend, PlayResult, Track};
 use crate::reply::{self, Reply};
 use crate::{Context, Error};
 
@@ -191,6 +191,10 @@ fn track_from_lavalink(t: &lavalink_rs::model::track::TrackData) -> Track {
 #[cfg(feature = "music-core")]
 #[async_trait]
 impl MusicBackend for LavalinkBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Lavalink
+    }
+
     async fn on_ready(
         &self,
         _ctx: &serenity::Context,
@@ -307,6 +311,62 @@ impl MusicBackend for LavalinkBackend {
         queue.append(lav_tracks.into())?;
 
         // Start playback if idle.
+        if let Ok(player_data) = player.get_player().await {
+            if player_data.track.is_none()
+                && queue.get_track(0).await.is_ok_and(|x| x.is_some())
+            {
+                player.skip()?;
+            }
+        }
+
+        Ok(summary)
+    }
+
+    async fn play_url(
+        &self,
+        guild: serenity::GuildId,
+        url: &str,
+        requester: UserId,
+    ) -> Result<PlayResult, Error> {
+        let client = self.client().await?;
+        let player = self.player(guild).await?;
+
+        let loaded = client.load_tracks(guild, url).await?;
+        let (mut lav_tracks, summary) = match loaded.data {
+            Some(TrackLoadData::Track(t)) => {
+                let display = track_from_lavalink(&t);
+                (vec![TrackInQueue::from(t)], PlayResult::Added(display))
+            }
+            Some(TrackLoadData::Search(list)) => {
+                let Some(first) = list.first() else {
+                    return Ok(PlayResult::NoMatch);
+                };
+                let display = track_from_lavalink(first);
+                (
+                    vec![TrackInQueue::from(first.clone())],
+                    PlayResult::Added(display),
+                )
+            }
+            Some(TrackLoadData::Playlist(pl)) => {
+                let name = pl.info.name.clone();
+                let Some(first) = pl.tracks.first().map(track_from_lavalink) else {
+                    return Ok(PlayResult::NoMatch);
+                };
+                let count = pl.tracks.len();
+                let lav: Vec<TrackInQueue> =
+                    pl.tracks.into_iter().map(TrackInQueue::from).collect();
+                (lav, PlayResult::Playlist { name, count, first })
+            }
+            _ => return Ok(PlayResult::NoMatch),
+        };
+
+        for i in &mut lav_tracks {
+            i.track.user_data = Some(serde_json::json!({"requester_id": requester.get()}));
+        }
+
+        let queue = player.get_queue();
+        queue.append(lav_tracks.into())?;
+
         if let Ok(player_data) = player.get_player().await {
             if player_data.track.is_none()
                 && queue.get_track(0).await.is_ok_and(|x| x.is_some())

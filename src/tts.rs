@@ -178,6 +178,29 @@ pub async fn speak(
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
 
+    // Lavalink owns the voice UDP session, so songbird can't push TTS bytes
+    // through its mixer. Bail with an explanation rather than silently
+    // queueing audio that will never play.
+    #[cfg(feature = "music-core")]
+    if matches!(
+        ctx.data().music.kind(),
+        crate::music_backend::BackendKind::Lavalink
+    ) {
+        reply::send(
+            &ctx,
+            Reply::new()
+                .content(
+                    "TTS is not supported on the lavalink music backend yet. \
+                     Switch to `MUSIC_BACKEND=native`, or wait for lavalink \
+                     URL-relay support.",
+                )
+                .ephemeral(true)
+                .delete_invoker(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let manager = songbird::get(ctx.serenity_context())
         .await
         .ok_or("songbird not registered")?

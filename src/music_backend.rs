@@ -42,6 +42,15 @@ pub enum PlayResult {
     NoMatch,
 }
 
+/// Which concrete backend is handling playback. Commands use this to branch
+/// behavior that only makes sense for one backend (e.g. bypassing lavalink
+/// for features it can't currently serve).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    Lavalink,
+    Native,
+}
+
 /// Trait every music backend implements.
 ///
 /// Lifecycle:
@@ -72,11 +81,27 @@ pub trait MusicBackend: Send + Sync + 'static {
     /// Leave the voice channel in `guild`.
     async fn leave(&self, ctx: &serenity::Context, guild: GuildId) -> Result<(), Error>;
 
+    /// Which concrete backend this is. Used for capability checks in
+    /// commands whose behavior depends on the underlying driver.
+    fn kind(&self) -> BackendKind;
+
     /// Resolve `query` (URL or search term) and enqueue matching tracks.
     async fn play(
         &self,
         guild: GuildId,
         query: &str,
+        requester: UserId,
+    ) -> Result<PlayResult, Error>;
+
+    /// Enqueue a direct audio URL. The URL must be reachable by whoever
+    /// will actually pull bytes: the lavalink node for lavalink backends,
+    /// this process for native. Unlike [`MusicBackend::play`], no search
+    /// or yt-dlp resolution is performed — the URL is treated as a raw
+    /// audio source.
+    async fn play_url(
+        &self,
+        guild: GuildId,
+        url: &str,
         requester: UserId,
     ) -> Result<PlayResult, Error>;
 

@@ -30,12 +30,12 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, GuildId, UserId};
 use songbird::Songbird;
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
-use songbird::input::{Input, YoutubeDl};
+use songbird::input::{HttpRequest, Input, YoutubeDl};
 use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 use crate::Error;
-use crate::music_backend::{MusicBackend, PlayResult, Track};
+use crate::music_backend::{BackendKind, MusicBackend, PlayResult, Track};
 
 #[derive(Default)]
 struct GuildMeta {
@@ -107,6 +107,16 @@ impl NativeBackend {
     }
 }
 
+fn title_from_url(url: &str) -> String {
+    let no_query = url.split('?').next().unwrap_or(url);
+    no_query
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(url)
+        .to_string()
+}
+
 async fn track_from_youtube_dl(
     src: &mut YoutubeDl<'_>,
     fallback_title: &str,
@@ -134,6 +144,10 @@ async fn track_from_youtube_dl(
 
 #[async_trait]
 impl MusicBackend for NativeBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Native
+    }
+
     async fn on_ready(
         &self,
         ctx: &serenity::Context,
@@ -221,6 +235,57 @@ impl MusicBackend for NativeBackend {
         }
 
         // songbird auto-starts playback when enqueueing into an empty queue.
+        if queue_len == 1 {
+            meta.now_playing = Some(track.clone());
+        } else {
+            meta.queue.push(track.clone());
+        }
+
+        Ok(PlayResult::Added(track))
+    }
+
+    async fn play_url(
+        &self,
+        guild: GuildId,
+        url: &str,
+        requester: UserId,
+    ) -> Result<PlayResult, Error> {
+        let manager = self.songbird().await?;
+        let call = manager.get(guild).ok_or("not in voice")?;
+
+        // Raw HTTP fetch — no yt-dlp, no metadata probe. Synthesize a
+        // minimal Track from the URL itself.
+        let src = HttpRequest::new(self.http.clone(), url.to_string());
+        let track = Track {
+            title: title_from_url(url),
+            author: "URL".into(),
+            uri: Some(url.to_string()),
+            duration_ms: None,
+            requester: Some(requester.get()),
+        };
+
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+
+        let mut handler = call.lock().await;
+        let track_handle = handler.enqueue_input(Input::from(src)).await;
+        let queue_len = handler.queue().current_queue().len();
+        drop(handler);
+
+        if let Err(e) = track_handle.add_event(
+            Event::Track(TrackEvent::End),
+            AdvanceOnEnd {
+                meta: self.meta.clone(),
+                guild,
+            },
+        ) {
+            debug!(
+                target: "bot_template_rs::music",
+                error = ?e,
+                "failed to attach track-end handler for url; metadata may lag"
+            );
+        }
+
         if queue_len == 1 {
             meta.now_playing = Some(track.clone());
         } else {

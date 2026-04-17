@@ -71,6 +71,7 @@ async fn async_main() -> Result<(), Error> {
                     music::join(),
                     music::leave(),
                     music::play(),
+                    music::play_file(),
                     music::stop(),
                     music::pause(),
                     music::resume(),

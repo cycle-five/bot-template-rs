@@ -1,0 +1,16 @@
+# Build artifacts — cargo-chef rebuilds inside the image.
+target/
+
+# Runtime state that lives on the host, not in the image.
+logs/
+config/*.yaml
+config/playlists/
+.env
+
+# Not needed in the build context.
+Dockerfile
+docker-compose.yml
+.github/
+*.md
+flake.nix
+flake.lock

@@ -1,0 +1,16 @@
+# Layered on top of the upstream tts-service image to bake in a throwaway
+# gcloud service-account JSON. tts-service eagerly initializes every mode
+# at startup and unwraps GOOGLE_APPLICATION_CREDENTIALS (src/modes/gcloud.rs),
+# so we need a file with a parseable RSA key on disk even for eSpeak-only
+# deployments. The key is generated at image-build time and never leaves
+# the image; gcloud API calls would fail, but we never make any unless
+# TTS_MODE=gcloud.
+FROM gnomeddev/tts-service:latest
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl jq \
+    && openssl genrsa -out /tmp/key.pem 2048 \
+    && jq -n --rawfile key /tmp/key.pem '{"type":"service_account","project_id":"dummy","private_key_id":"dummy","private_key":$key,"client_email":"dummy@dummy.iam.gserviceaccount.com","client_id":"0","token_uri":"https://oauth2.googleapis.com/token"}' > /etc/gcloud-sa.json \
+    && rm /tmp/key.pem \
+    && rm -rf /var/lib/apt/lists/*
+ENV GOOGLE_APPLICATION_CREDENTIALS=/etc/gcloud-sa.json
+ENV AWS_REGION=us-east-1

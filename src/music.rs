@@ -262,6 +262,85 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Play audio attachments from a Discord message.
+///
+/// Works as a message context-menu action ("Apps → Play attachments").
+/// Discord attachments live on the Discord CDN at publicly reachable URLs,
+/// so we route each audio attachment through [`MusicBackend::play_url`] —
+/// no bot-hosted HTTP server required.
+#[poise::command(context_menu_command = "Play attachments", guild_only)]
+pub async fn play_file(
+    ctx: Context<'_>,
+    #[description = "Message with an audio attachment"] msg: serenity::Message,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let backend = ctx.data().music.clone();
+
+    join_voice(&ctx, guild_id, None).await?;
+
+    let audio_attachments: Vec<&serenity::Attachment> = msg
+        .attachments
+        .iter()
+        .filter(|a| is_audio_attachment(a))
+        .collect();
+
+    if audio_attachments.is_empty() {
+        status(&ctx, "That message has no audio attachments.", true).await?;
+        return Ok(());
+    }
+
+    let mut added = 0usize;
+    let mut last_embed: Option<CreateEmbed> = None;
+    for att in &audio_attachments {
+        match backend
+            .play_url(guild_id, &att.url, ctx.author().id)
+            .await
+        {
+            Ok(PlayResult::Added(t)) => {
+                added += 1;
+                last_embed = Some(music_embed("Added attachment", track_line(&t)));
+            }
+            Ok(PlayResult::Playlist { name, count, .. }) => {
+                added += count;
+                last_embed = Some(music_embed(
+                    "Added attachment playlist",
+                    format!("**{name}** — {count} track(s)"),
+                ));
+            }
+            Ok(PlayResult::NoMatch) => {
+                // One bad attachment shouldn't abort the others.
+            }
+            Err(why) => {
+                status(&ctx, format!("Error loading `{}`: {why}", att.filename), true).await?;
+            }
+        }
+    }
+
+    if added == 0 {
+        status(&ctx, "Couldn't resolve any of those attachments.", true).await?;
+        return Ok(());
+    }
+
+    if let Some(embed) = last_embed {
+        now_playing(&ctx, embed).await?;
+    }
+    Ok(())
+}
+
+fn is_audio_attachment(a: &serenity::Attachment) -> bool {
+    if let Some(ct) = a.content_type.as_deref() {
+        if ct.starts_with("audio/") {
+            return true;
+        }
+    }
+    let name = a.filename.to_ascii_lowercase();
+    matches!(
+        name.rsplit('.').next(),
+        Some("wav" | "mp3" | "ogg" | "opus" | "flac" | "m4a" | "aac" | "webm")
+    )
+}
+
 /// Show the current queue: what's playing now and the next tracks in line.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
