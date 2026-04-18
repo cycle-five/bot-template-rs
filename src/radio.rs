@@ -254,10 +254,18 @@ pub async fn radio(_ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Start broadcasting this voice channel under `name`. Guild must be enabled.
-#[poise::command(slash_command, prefix_command, rename = "broadcast")]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    rename = "broadcast",
+    default_member_permissions = "MANAGE_GUILD"
+)]
 pub async fn broadcast(
     ctx: Context<'_>,
     #[description = "Station name other guilds use to tune in"] name: String,
+    #[description = "Voice channel to broadcast from (default: bot's current or yours)"]
+    #[channel_types("Voice")]
+    channel: Option<serenity::ChannelId>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
@@ -289,26 +297,31 @@ pub async fn broadcast(
         return Ok(());
     }
 
-    // Ensure the bot is in the invoker's voice channel.
-    let Some(channel_id) = voice_channel_of(&ctx, guild_id) else {
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .ok_or("songbird not registered")?
+        .clone();
+
+    // Resolve target: explicit arg > existing bot call > invoker's VC.
+    let call = if let Some(target) = channel {
+        manager.join(guild_id, target).await?
+    } else if let Some(existing) = manager.get(guild_id) {
+        existing
+    } else if let Some(invoker_vc) = voice_channel_of(&ctx, guild_id) {
+        manager.join(guild_id, invoker_vc).await?
+    } else {
         reply::send(
             ctx_ref(&ctx),
             Reply::new()
-                .content("Join a voice channel first so I know what to broadcast.")
+                .content(
+                    "I'm not in a voice channel and neither are you. Join one, \
+                     pass `channel`, or have me `/join` first.",
+                )
                 .ephemeral(true)
                 .delete_invoker(true),
         )
         .await?;
         return Ok(());
-    };
-
-    let manager = songbird::get(ctx.serenity_context())
-        .await
-        .ok_or("songbird not registered")?
-        .clone();
-    let call = match manager.get(guild_id) {
-        Some(c) => c,
-        None => manager.join(guild_id, channel_id).await?,
     };
 
     // Register the station in the shared state *before* attaching the
@@ -409,6 +422,9 @@ pub async fn silence(ctx: Context<'_>) -> Result<(), Error> {
 pub async fn tune(
     ctx: Context<'_>,
     #[description = "Name of a live station (see /radio stations)"] name: String,
+    #[description = "Voice channel to play in (default: bot's current or yours)"]
+    #[channel_types("Voice")]
+    channel: Option<serenity::ChannelId>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
@@ -440,26 +456,31 @@ pub async fn tune(
         return Ok(());
     }
 
-    // Ensure the bot is in the invoker's voice channel.
-    let Some(channel_id) = voice_channel_of(&ctx, guild_id) else {
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .ok_or("songbird not registered")?
+        .clone();
+
+    // Resolve target: explicit arg > existing bot call > invoker's VC.
+    let call = if let Some(target) = channel {
+        manager.join(guild_id, target).await?
+    } else if let Some(existing) = manager.get(guild_id) {
+        existing
+    } else if let Some(invoker_vc) = voice_channel_of(&ctx, guild_id) {
+        manager.join(guild_id, invoker_vc).await?
+    } else {
         reply::send(
             ctx_ref(&ctx),
             Reply::new()
-                .content("Join a voice channel first so I know where to play.")
+                .content(
+                    "I'm not in a voice channel and neither are you. Join one, \
+                     pass `channel`, or have me `/join` first.",
+                )
                 .ephemeral(true)
                 .delete_invoker(true),
         )
         .await?;
         return Ok(());
-    };
-
-    let manager = songbird::get(ctx.serenity_context())
-        .await
-        .ok_or("songbird not registered")?
-        .clone();
-    let call = match manager.get(guild_id) {
-        Some(c) => c,
-        None => manager.join(guild_id, channel_id).await?,
     };
 
     // Replace any existing subscription for this guild.
