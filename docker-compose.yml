@@ -24,11 +24,12 @@ services:
     environment:
       # Speaches honors HF_HOME for its model cache.
       HF_HOME: /data/huggingface
+      HF_HUB_CACHE: /data/huggingface/hub
     volumes:
       - speaches-models:/data
     restart: unless-stopped
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
 
   tts-service:
     # Layered on top of gnomeddev/tts-service:latest; see Dockerfile.tts
@@ -82,7 +83,10 @@ services:
       TTS_AUTH_KEY: ${TTS_AUTH_KEY:-}
       STT_BASE_URL: ${STT_BASE_URL:-http://speaches:8000/v1}
       STT_API_KEY: ${STT_API_KEY:-}
-      STT_MODEL: ${STT_MODEL:-whisper-1}
+      # Speaches expects Hugging Face repo names (faster-whisper),
+      # not the OpenAI alias `whisper-1`. For API providers (lemonfox,
+      # OpenAI, Groq), override this to `whisper-1` in .env.
+      STT_MODEL: ${STT_MODEL:-Systran/faster-whisper-small}
       STT_LANGUAGE: ${STT_LANGUAGE:-}
       RUST_LOG: ${RUST_LOG:-bot_template_rs=debug,lavalink_rs=info,serenity=warn}
     extra_hosts:
