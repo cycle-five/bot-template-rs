@@ -14,6 +14,13 @@
 # your own `lavalink:` service and point LAVALINK_HOST at it.
 
 services:
+  init-perms:
+    image: alpine:3.20
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 1000:1000 /data && chmod -R u+rwX /data"]
+    volumes:
+      - speaches-models:/data
+    restart: "no"
   # Speech-to-text sidecar (OpenAI-compatible Whisper server). Off by default;
   # start with: `docker compose --profile stt up`. Use the CUDA image instead
   # of CPU if you have an Nvidia GPU passed through. Models are cached in the
@@ -21,8 +28,15 @@ services:
   speaches:
     image: ghcr.io/speaches-ai/speaches:latest-cpu
     profiles: ["stt"]
+    # Upstream image runs as `ubuntu` (UID 1000). Docker creates named-volume
+    # mount points owned by root:root, so huggingface_hub can't mkdir the
+    # cache under /data. Running as root sidesteps the chown dance. For a
+    # more locked-down setup, swap this for an init container that chowns
+    # the volume to 1000:1000 before speaches starts.
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
     environment:
-      # Speaches honors HF_HOME for its model cache.
       HF_HOME: /data/huggingface
       HF_HUB_CACHE: /data/huggingface/hub
     volumes:
