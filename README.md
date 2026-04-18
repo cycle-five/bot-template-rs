@@ -20,6 +20,7 @@ command-only bot or the whole kitchen sink.
 | Per-user voice recording | `record` | Opus-in-Ogg writers, zipped on `/record stop` |
 | Text-to-speech | `tts` | via [GnomedDev/tts-service](https://github.com/GnomedDev/tts-service) |
 | Speech-to-text | `stt` | any OpenAI-compatible provider (lemonfox, OpenAI, Groq, self-hosted [Speaches](https://github.com/speaches-ai/speaches)) |
+| Cross-guild voice "radio" | `radio` | single-bot, multi-guild audio bridging; no bot-to-bot transport |
 
 Both music backends can be compiled in simultaneously; `MUSIC_BACKEND=native|lavalink`
 picks at startup. TTS works with either — it takes a URL-relay path through
@@ -100,6 +101,12 @@ Subject to feature flags:
 /tts speak|show|set|voices
 /stt transcribe|show|set     # transcribe via any OpenAI-compatible provider
                              # also: "Apps → Transcribe attachment" on a message
+/radio broadcast <name>      # start a broadcast from current VC
+/radio silence               # stop broadcasting
+/radio tune <name>           # tune this guild's VC to a live station
+/radio unplug                # stop listening
+/radio stations              # list live stations
+/radio enable|disable        # admin: guild opt-in
 /lavalink show|set|connect   # admin: runtime lavalink config
 ```
 

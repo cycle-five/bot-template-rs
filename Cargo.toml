@@ -125,3 +125,8 @@ record = ["voice-recv", "dep:ogg", "dep:zip"]
 # `ghcr.io/speaches-ai/speaches` sidecar. Provider is picked at runtime
 # via env/config, no separate compile-time backend needed.
 stt = ["record", "dep:reqwest", "dep:serde_json"]
+# Cross-guild voice bridging ("radio"). One bot instance in multiple
+# guilds, PCM passthrough via an in-process broadcast channel. Audio
+# flows over Discord's voice servers on both legs — no bot-to-bot
+# transport, no public IP exposure.
+radio = ["voice-recv", "songbird/builtin-queue"]

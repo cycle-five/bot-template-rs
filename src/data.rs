@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "lavalink", feature = "tts", feature = "stt"))]
@@ -16,6 +17,8 @@ use crate::music_backend::MusicBackend;
 use crate::native_backend::NativeBackend;
 #[cfg(feature = "playlists")]
 use crate::playlist::{PlaylistStore, YamlPlaylistStore};
+#[cfg(feature = "radio")]
+use crate::radio::{RadioStation, RadioSubscription};
 #[cfg(feature = "record")]
 use crate::record::RecordingSession;
 use crate::reply::{Slot, TrackedMessage};
@@ -38,6 +41,12 @@ pub struct GuildConfig {
     /// `/record start`; admins can toggle via `/record disable|enable`.
     #[serde(default = "default_true")]
     pub recording_enabled: bool,
+    /// Whether this guild may broadcast voice via `/radio broadcast`.
+    /// Opt-in (defaults to false) because broadcasting carries the
+    /// voice of everyone in the source channel to listener guilds.
+    #[cfg(feature = "radio")]
+    #[serde(default)]
+    pub radio_broadcast_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -50,6 +59,8 @@ impl Default for GuildConfig {
             guild_id: 0,
             music_channel_id: None,
             recording_enabled: true,
+            #[cfg(feature = "radio")]
+            radio_broadcast_enabled: false,
         }
     }
 }
@@ -59,7 +70,7 @@ impl Default for GuildConfig {
 pub struct Data {
     // Map of guild_id -> guild configuration, you'll need one of these for anything more
     // than the most trivial commands.
-    pub guild_configs: dashmap::DashMap<serenity::GuildId, GuildConfig>,
+    pub guild_configs: DashMap<serenity::GuildId, GuildConfig>,
     // Cache from the bot's context, you'll probably need this for some commands
     pub cache: Arc<serenity::Cache>,
     /// Concrete Lavalink backend handle — used by `/lavalink` admin commands
@@ -91,6 +102,14 @@ pub struct Data {
     /// via `/stt set`; persists to `config/stt.yaml`.
     #[cfg(feature = "stt")]
     pub stt: Arc<HttpSttBackend>,
+    /// Live radio stations this bot is hosting, keyed by station name.
+    /// Inserted by `/radio broadcast`, removed by `/radio silence`.
+    #[cfg(feature = "radio")]
+    pub radio_stations: Arc<DashMap<String, Arc<RadioStation>>>,
+    /// Per-guild tuning subscriptions. At most one per guild at a time.
+    /// Dropping a subscription aborts its forwarder task.
+    #[cfg(feature = "radio")]
+    pub radio_subscriptions: Arc<DashMap<serenity::GuildId, RadioSubscription>>,
     /// Live bot-sent messages tracked per (guild, slot) for the
     /// replace-previous behavior. In-memory only; not persisted.
     pub tracked_messages: Arc<dashmap::DashMap<(serenity::GuildId, Slot), TrackedMessage>>,
@@ -156,6 +175,10 @@ impl Data {
             tts: Arc::new(TtsClient::new(TtsConfig::from_env())),
             #[cfg(feature = "stt")]
             stt: Arc::new(HttpSttBackend::new(SttConfig::from_env())),
+            #[cfg(feature = "radio")]
+            radio_stations: Arc::new(DashMap::new()),
+            #[cfg(feature = "radio")]
+            radio_subscriptions: Arc::new(DashMap::new()),
             #[cfg(feature = "tts")]
             audio_store: {
                 let public_url = std::env::var("BOT_PUBLIC_URL").ok().filter(|s| !s.is_empty());

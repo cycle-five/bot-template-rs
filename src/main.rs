@@ -17,6 +17,8 @@ mod music_backend;
 mod native_backend;
 #[cfg(feature = "playlists")]
 mod playlist;
+#[cfg(feature = "radio")]
+mod radio;
 #[cfg(feature = "record")]
 mod record;
 mod reply;
@@ -93,6 +95,8 @@ async fn async_main() -> Result<(), Error> {
                     v.push(stt::stt());
                     v.push(stt::transcribe_message());
                 }
+                #[cfg(feature = "radio")]
+                v.push(radio::radio());
                 v
             },
             pre_command: |ctx| {
@@ -175,7 +179,18 @@ async fn async_main() -> Result<(), Error> {
     let client_builder = serenity::ClientBuilder::new(token, intents)
         .event_handler(handlers::Handler)
         .framework(framework);
-    #[cfg(feature = "voice")]
+    // Radio needs decoded PCM from VoiceTick (default mode only decrypts).
+    // Record is fine with either — it takes the raw Opus payload straight
+    // off the packet. So: enable full decode when radio is compiled in,
+    // otherwise use songbird's defaults.
+    #[cfg(all(feature = "voice", feature = "radio"))]
+    let client_builder = {
+        let sb_config = songbird::Config::default().decode_mode(
+            songbird::driver::DecodeMode::Decode(songbird::driver::DecodeConfig::default()),
+        );
+        client_builder.register_songbird_from_config(sb_config)
+    };
+    #[cfg(all(feature = "voice", not(feature = "radio")))]
     let client_builder = client_builder.register_songbird();
     let mut client = client_builder
         .await

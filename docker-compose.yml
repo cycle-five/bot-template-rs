@@ -67,7 +67,7 @@ services:
     build:
       context: .
       args:
-        FEATURES: ${BOT_FEATURES:-music music-native playlists record tts stt}
+        FEATURES: ${BOT_FEATURES:-music music-native playlists record tts stt radio}
     depends_on:
       - tts-service
     env_file:

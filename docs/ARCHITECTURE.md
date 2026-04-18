@@ -21,6 +21,7 @@ src/
 ├── record.rs             # voice capture → per-user Ogg → zip
 ├── tts.rs                # TtsClient + /tts commands
 ├── stt.rs                # SttBackend trait + HTTP impl + /stt commands
+├── radio.rs              # Cross-guild voice bridging ("radio")
 └── audio_http.rs         # AudioStore + axum server for URL-relay to lavalink
 ```
 
@@ -44,6 +45,7 @@ voice-recv       = voice + songbird/{driver, receive, tungstenite}
 record           = voice-recv + dep:ogg + dep:zip
 tts              = native + dep:axum
 stt              = record + dep:reqwest + dep:serde_json
+radio            = voice-recv + songbird/builtin-queue
 ```
 
 `music` and `music-native` are composable. With both on, `MUSIC_BACKEND`
@@ -178,6 +180,82 @@ truncated-inline with a `.txt` attachment for the full text, so Discord's
 2000-char content limit doesn't clip real conversations. The
 `transcribe_message` context-menu variant (`Apps → Transcribe attachment`)
 provides the same flow for messages already in the channel.
+
+## Radio (cross-guild voice bridging)
+
+Gated by the `radio` feature. The goal is "bot A's voice channel can be
+heard in bot B's voice channel" when both channels live on the same bot
+instance (one bot in many guilds). No bot-to-bot transport — audio flows
+over Discord's voice servers on both legs, so the bot never exposes a
+public voice endpoint and no IP leaks.
+
+Side note on decode mode: songbird's default `DecodeMode::Decrypt` only
+returns RTP payload on `VoiceTick` (what `/record` wants). Radio needs
+PCM samples, so when the `radio` feature is compiled in, `main.rs`
+registers songbird with `DecodeMode::Decode` instead. `/record` keeps
+working because it pulls from the raw packet, which is still populated
+under either mode.
+
+### Pipeline
+
+```
+ guild A VC users
+       │
+       ▼
+ songbird driver (DecodeMode::Decode)
+       │  per-SSRC decoded PCM (i16 interleaved stereo @ 48 kHz)
+       ▼
+ BroadcastHandler (per-guild source call)
+       │  mix all speakers → one 20 ms PCM frame
+       ▼
+ tokio::sync::broadcast<Arc<[i16]>>     ← RadioStation.tx
+       │ fan-out to N listeners
+       ▼
+ forwarder task (per listening guild)
+       │  i16 → f32le conversion
+       ▼
+ tokio::io::duplex (small buffer — low latency)
+       ▼
+ PcmStream (AsyncRead + AsyncSeek + AsyncMediaSource)
+       ▼
+ AsyncAdapterStream (async → sync MediaSource bridge)
+       ▼
+ RawAdapter (tells songbird "this is 48 kHz stereo f32le PCM")
+       ▼
+ Input → songbird Call (guild B) → Discord voice server → guild B VC users
+```
+
+Each broadcast is named; destination guilds subscribe by name via
+`/radio tune <name>`. Subscriptions are keyed per-guild (one tuning per
+guild at a time) and tracked in `Data::radio_subscriptions`. Dropping a
+subscription aborts its forwarder task via `JoinHandle::abort`, which
+closes the duplex pipe on drop; songbird's track ends, the mixer stops
+feeding bytes to guild B. Clean shutdown, no zombies.
+
+### Privacy & opt-in
+
+Broadcasting requires `GuildConfig.radio_broadcast_enabled` (set by
+admin-only `/radio enable`). The default is `false`, hard opt-in: no
+guild can accidentally start re-broadcasting its voice channel. The
+broadcast-start command posts a public announcement so users in the
+source channel aren't surprised. Tuning in is unrestricted — from
+Discord's perspective, a listener bot playing remote audio is
+indistinguishable from `/play`.
+
+### Limits
+
+- Intentional: single-bot only. Bridging between two separately-operated
+  bots (different Discord apps) would need a WebSocket transport with
+  mutual auth. The `broadcast::Sender`/`Receiver` boundary is the seam
+  where such a transport would plug in if someone wants it later.
+- One concurrent tuning per listener guild. Switching stations
+  implicitly unplugs the previous one.
+- No DTX / silence compression: we always forward a full 20 ms frame
+  even when no one is speaking. Keeps the listener pipeline fed at
+  exactly 50 Hz — gaps would show up as audible gaps.
+- Two encode hops (Discord → decode in bot, bot → re-encode on send).
+  Quality loss is the same as any bot that re-encodes audio; not
+  noticeable in practice over voice bandwidth.
 
 ## Voice recording
 
