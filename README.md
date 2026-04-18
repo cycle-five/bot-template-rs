@@ -33,7 +33,7 @@ The fastest path — brings up the bot, the TTS service, and wires them
 together. Assumes you have a lavalink node somewhere reachable.
 
 ```sh
-git clone https://github.com/<you>/bot-template-rs && cd bot-template-rs
+git clone https://github.com/cycle-five/bot-template-rs && cd bot-template-rs
 cp .env.example .env
 # edit .env — at minimum DISCORD_TOKEN, LAVALINK_HOST, LAVALINK_PASSWORD
 docker compose up --build
