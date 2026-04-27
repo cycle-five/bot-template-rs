@@ -6,8 +6,10 @@
 //! source guild's [`Call`](songbird::Call) has a [`BroadcastHandler`]
 //! attached that mixes per-SSRC decoded PCM on each `VoiceTick` and
 //! pushes the mixed frame into a [`tokio::sync::broadcast`] channel.
-//! Destination guilds subscribe to that channel, decode samples back
-//! into a stream, and feed songbird's mixer via [`RawAdapter`].
+//! Destination guilds subscribe to that channel, encode the PCM to Opus,
+//! and feed songbird's mixer a DCA1 stream — which triggers Opus
+//! passthrough mode so the packets go straight to Discord's RTP with no
+//! decode/re-encode roundtrip.
 //!
 //! # Privacy posture
 //!
@@ -29,7 +31,7 @@
 //! of the template.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use std::io;
 use std::pin::Pin;
@@ -39,12 +41,15 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 use serenity::GuildId;
-use songbird::events::{CoreEvent, Event, EventContext, EventHandler};
-use songbird::input::{AsyncAdapterStream, AsyncMediaSource, Input, RawAdapter};
+use songbird::driver::opus::{
+    self as opus_codec, Application as OpusApplication, Channels as OpusChannels,
+};
+use songbird::events::{CoreEvent, Event, EventContext, EventHandler, TrackEvent};
+use songbird::input::{AsyncAdapterStream, AsyncMediaSource, AudioStream, Input, LiveInput};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWriteExt, DuplexStream, ReadBuf, duplex};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::reply::{self, Reply};
 use crate::{Context, Error};
@@ -58,8 +63,19 @@ const SAMPLES_PER_FRAME: usize = 960 * 2;
 /// Broadcast channel slot count. At ~50 Hz, 64 slots = ~1.3 s of buffering
 /// before a slow subscriber starts dropping with `Lagged`.
 const CHANNEL_CAPACITY: usize = 64;
-/// DuplexStream buffer — keep small so jitter doesn't build latency.
-const DUPLEX_BUFFER: usize = 16 * 1024;
+/// DuplexStream + AsyncAdapter ringbuffer size. Opus frames are small
+/// (~80 B at voip quality) so 64 KiB is plenty of jitter absorption.
+const DUPLEX_BUFFER: usize = 64 * 1024;
+/// Max Opus packet size the encoder can emit. Per RFC 7845, 4000 bytes
+/// covers the worst case (120 ms stereo high-bitrate).
+const OPUS_MAX_PACKET: usize = 4000;
+/// Minimal DCA1 metadata blob. DcaReader parses this as JSON and uses it
+/// to configure the track. Stereo @ 48 kHz, 20 ms frames, voip mode — must
+/// match what we actually encode below.
+const DCA1_METADATA_JSON: &str = concat!(
+    r#"{"dca":{"version":1,"tool":{"name":"bot-template-rs/radio","version":"0.1.0"}},"#,
+    r#""opus":{"mode":"voip","sample_rate":48000,"frame_size":960,"vbr":true,"channels":2}}"#,
+);
 
 // ---------------------------------------------------------------------------
 // Station + subscription state
@@ -116,6 +132,8 @@ impl Drop for RadioSubscription {
 struct BroadcastHandler {
     tx: broadcast::Sender<Arc<[i16]>>,
     active: Arc<AtomicBool>,
+    tick_ct: AtomicU64,
+    voiced_ct: AtomicU64,
 }
 
 #[async_trait]
@@ -129,10 +147,12 @@ impl EventHandler for BroadcastHandler {
             // RawAdapter pipeline expects a steady 50 Hz feed, and gaps
             // would show up as audio glitches.
             let mut mixed = vec![0i16; SAMPLES_PER_FRAME];
+            let mut voiced = false;
             for data in tick.speaking.values() {
                 let Some(samples) = &data.decoded_voice else {
                     continue;
                 };
+                voiced = true;
                 for (i, &s) in samples.iter().enumerate().take(SAMPLES_PER_FRAME) {
                     let sum = mixed[i] as i32 + s as i32;
                     mixed[i] = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
@@ -140,23 +160,38 @@ impl EventHandler for BroadcastHandler {
             }
             // Ignore SendError — just means no subscribers right now.
             let _ = self.tx.send(Arc::from(mixed));
+
+            let ticks = self.tick_ct.fetch_add(1, Ordering::Relaxed) + 1;
+            if voiced {
+                self.voiced_ct.fetch_add(1, Ordering::Relaxed);
+            }
+            if ticks == 1 || ticks % 250 == 0 {
+                debug!(
+                    target: "bot_template_rs::radio",
+                    ticks,
+                    voiced = self.voiced_ct.load(Ordering::Relaxed),
+                    subscribers = self.tx.receiver_count(),
+                    "broadcast tick"
+                );
+            }
         }
         None
     }
 }
 
 // ---------------------------------------------------------------------------
-// Receiver: broadcast channel -> duplex pipe -> RawAdapter -> songbird
+// Receiver: broadcast channel -> opus encoder -> DCA1 framing -> duplex pipe
+//          -> AsyncAdapterStream -> songbird (Opus passthrough)
 // ---------------------------------------------------------------------------
 
 /// A non-seekable, length-unknown async wrapper around a `DuplexStream`,
-/// tagged with the traits songbird's `AsyncAdapterStream` needs. We can
-/// ignore seeks because the upstream is a live PCM stream.
-struct PcmStream {
+/// tagged with the traits songbird's `AsyncAdapterStream` needs. The bytes
+/// flowing through are a live DCA1 stream.
+struct DuplexMediaSource {
     inner: DuplexStream,
 }
 
-impl AsyncRead for PcmStream {
+impl AsyncRead for DuplexMediaSource {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut StdContext<'_>,
@@ -166,9 +201,9 @@ impl AsyncRead for PcmStream {
     }
 }
 
-impl AsyncSeek for PcmStream {
+impl AsyncSeek for DuplexMediaSource {
     fn start_seek(self: Pin<&mut Self>, _pos: io::SeekFrom) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "pcm stream is not seekable"))
+        Err(io::Error::new(io::ErrorKind::Unsupported, "radio stream is not seekable"))
     }
     fn poll_complete(
         self: Pin<&mut Self>,
@@ -179,7 +214,7 @@ impl AsyncSeek for PcmStream {
 }
 
 #[async_trait]
-impl AsyncMediaSource for PcmStream {
+impl AsyncMediaSource for DuplexMediaSource {
     fn is_seekable(&self) -> bool {
         false
     }
@@ -188,35 +223,142 @@ impl AsyncMediaSource for PcmStream {
     }
 }
 
+struct TrackEndLogger;
+
+#[async_trait]
+impl EventHandler for TrackEndLogger {
+    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        if let EventContext::Track(list) = ctx {
+            for (state, _handle) in *list {
+                warn!(
+                    target: "bot_template_rs::radio",
+                    play_mode = ?state.playing,
+                    position_ms = state.position.as_millis(),
+                    "listener track ended"
+                );
+            }
+        }
+        None
+    }
+}
+
+/// Build the one-time DCA1 header: magic + u32-le metadata length + JSON blob.
+fn dca1_header() -> Vec<u8> {
+    let meta = DCA1_METADATA_JSON.as_bytes();
+    let mut out = Vec::with_capacity(8 + meta.len());
+    out.extend_from_slice(b"DCA1");
+    out.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+    out.extend_from_slice(meta);
+    out
+}
+
 async fn attach_listener(
     dest_call: Arc<tokio::sync::Mutex<songbird::Call>>,
     mut rx: broadcast::Receiver<Arc<[i16]>>,
 ) -> Result<JoinHandle<()>, Error> {
-    let (mut writer, reader) = duplex(DUPLEX_BUFFER);
+    let (writer, reader) = duplex(DUPLEX_BUFFER);
 
-    // Forwarder: pull i16 frames off the broadcast channel, convert to
-    // f32le (what RawAdapter consumes), write to the duplex pipe. Aborts
-    // when the channel closes, when the duplex write errors (adapter was
-    // dropped), or when the handle is aborted from outside.
+    // Forwarder: pull i16 stereo frames off the broadcast channel, encode
+    // each as a single 20 ms Opus packet, and write it framed for DcaReader
+    // (`u16-le len || opus-bytes`). Prepend the DCA1 header exactly once so
+    // the first bytes the sync reader sees form a valid format signature.
     let forwarder = tokio::spawn(async move {
-        let mut scratch = Vec::with_capacity(SAMPLES_PER_FRAME * 4);
+        let mut writer = writer;
+
+        if let Err(e) = writer.write_all(&dca1_header()).await {
+            warn!(
+                target: "bot_template_rs::radio",
+                error = %e,
+                "forwarder exiting: DCA1 header write failed"
+            );
+            return;
+        }
+
+        let mut encoder = match opus_codec::Encoder::new(
+            48_000,
+            OpusChannels::Stereo,
+            OpusApplication::Voip,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(
+                    target: "bot_template_rs::radio",
+                    error = %e,
+                    "forwarder exiting: opus encoder init failed"
+                );
+                return;
+            }
+        };
+        let mut packet = vec![0u8; OPUS_MAX_PACKET];
+        let mut frame_ct: u64 = 0;
+        let mut slow_write_ct: u64 = 0;
+
         loop {
             match rx.recv().await {
                 Ok(frame) => {
-                    scratch.clear();
-                    for &s in frame.iter() {
-                        let f = f32::from(s) / f32::from(i16::MAX);
-                        scratch.extend_from_slice(&f.to_le_bytes());
+                    let n = match encoder.encode(&frame, &mut packet) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            warn!(
+                                target: "bot_template_rs::radio",
+                                error = %e,
+                                "opus encode failed; skipping frame"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let len_bytes = (n as u16).to_le_bytes();
+                    let write_start = std::time::Instant::now();
+                    let r = async {
+                        writer.write_all(&len_bytes).await?;
+                        writer.write_all(&packet[..n]).await
                     }
-                    if writer.write_all(&scratch).await.is_err() {
+                    .await;
+                    let elapsed = write_start.elapsed();
+
+                    if let Err(e) = r {
+                        warn!(
+                            target: "bot_template_rs::radio",
+                            frames = frame_ct,
+                            error = %e,
+                            "forwarder exiting: duplex write_all failed"
+                        );
                         return;
                     }
+                    if elapsed.as_millis() > 30 {
+                        slow_write_ct += 1;
+                        warn!(
+                            target: "bot_template_rs::radio",
+                            frame = frame_ct,
+                            elapsed_ms = elapsed.as_millis(),
+                            slow_writes = slow_write_ct,
+                            "forwarder duplex write took > 30 ms (mixer back-pressure)"
+                        );
+                    }
+                    frame_ct += 1;
+                    if frame_ct == 1 || frame_ct % 250 == 0 {
+                        debug!(
+                            target: "bot_template_rs::radio",
+                            frames = frame_ct,
+                            opus_bytes = n,
+                            slow_writes = slow_write_ct,
+                            "forwarder frames written"
+                        );
+                    }
                 }
-                Err(broadcast::error::RecvError::Closed) => return,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!(
+                Err(broadcast::error::RecvError::Closed) => {
+                    warn!(
                         target: "bot_template_rs::radio",
-                        frames = n,
+                        frames = frame_ct,
+                        "forwarder exiting: broadcast channel closed"
+                    );
+                    return;
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    info!(
+                        target: "bot_template_rs::radio",
+                        dropped = n,
                         "listener lagged; dropped frames"
                     );
                 }
@@ -224,15 +366,21 @@ async fn attach_listener(
         }
     });
 
-    // DuplexStream is async; wrap it as AsyncMediaSource, then through
-    // AsyncAdapterStream to get a sync MediaSource that RawAdapter accepts.
-    let pcm = PcmStream { inner: reader };
-    let sync_stream = AsyncAdapterStream::new(Box::new(pcm), DUPLEX_BUFFER);
-    let adapter = RawAdapter::new(sync_stream, 48_000, 2);
-    let input = Input::from(adapter);
+    // Async duplex reader -> sync MediaSource. symphonia's probe sees the
+    // "DCA1" magic on the first read and picks DcaReader; songbird's mixer
+    // then activates Opus passthrough, forwarding our packets straight to
+    // Discord's RTP with no decode or re-encode.
+    let src = DuplexMediaSource { inner: reader };
+    let sync_stream = AsyncAdapterStream::new(Box::new(src), DUPLEX_BUFFER);
+    let live = LiveInput::Raw(AudioStream {
+        input: Box::new(sync_stream),
+    });
+    let input = Input::Live(live, None);
 
     let mut handler = dest_call.lock().await;
-    let _track = handler.enqueue_input(input).await;
+    let track_handle = handler.enqueue_input(input).await;
+    let _ = track_handle.add_event(Event::Track(TrackEvent::End), TrackEndLogger);
+    let _ = track_handle.add_event(Event::Track(TrackEvent::Error), TrackEndLogger);
 
     Ok(forwarder)
 }
@@ -339,6 +487,8 @@ pub async fn broadcast(
             BroadcastHandler {
                 tx: station.tx.clone(),
                 active: station.active.clone(),
+                tick_ct: AtomicU64::new(0),
+                voiced_ct: AtomicU64::new(0),
             },
         );
     }
