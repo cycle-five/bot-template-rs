@@ -46,26 +46,10 @@ pub use data::Data;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
-/// Main function to run the bot
-async fn async_main() -> Result<(), Error> {
-    // Load variables from a local .env file (if present) before anything else
-    // reads from the environment.
-    let _ = dotenvy::dotenv();
-
-    // Initialize logging
-    logging::init()?;
-
-    // Load environment variables
-    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");
-    let prefix = env::var("PREFIX").unwrap_or_else(|_| "!".to_string());
-
-    // Load the bot's data from file
-    info!("Loading bot data...");
-    let data = Data::load().await;
-    let data_clone = data.clone();
-
+/// Build the Poise framework with our commands and options configured.
+fn build_framework(data: Data, prefix: String) -> poise::Framework<Data, Error> {
     // Configure the Poise framework
-    let framework = poise::Framework::builder()
+    poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: {
                 #[allow(unused_mut)]
@@ -169,7 +153,28 @@ async fn async_main() -> Result<(), Error> {
                 Ok(data)
             })
         })
-        .build();
+        .build()
+}
+
+/// Main function to run the bot
+async fn async_main() -> Result<(), Error> {
+    // Load variables from a local .env file (if present) before anything else
+    // reads from the environment.
+    let _ = dotenvy::dotenv();
+
+    // Initialize logging
+    logging::init()?;
+
+    // Load environment variables
+    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");
+    let prefix = env::var("PREFIX").unwrap_or_else(|_| "!".to_string());
+
+    // Load the bot's data from file
+    info!("Loading bot data...");
+    let data = Data::load().await;
+    let data_clone = data.clone();
+
+    let framework = build_framework(data, prefix);
 
     // Configure the Serenity client
     let intents = GatewayIntents::non_privileged();

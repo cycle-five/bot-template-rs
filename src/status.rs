@@ -1,5 +1,7 @@
 //! The `status` command: build & runtime information for the bot.
 
+use std::fmt::Write;
+
 use crate::reply::{self, Reply, Slot};
 use crate::{Context, Error};
 
@@ -20,7 +22,7 @@ fn format_uptime(started: DateTime<Utc>) -> String {
     }
 }
 
-/// Parse a seconds-since-epoch string (from build-time env) into a DateTime.
+/// Parse a seconds-since-epoch string (from build-time env) into a `DateTime`.
 fn parse_build_ts() -> Option<DateTime<Utc>> {
     let raw = option_env!("BUILD_TIMESTAMP")?;
     let secs: i64 = raw.parse().ok()?;
@@ -42,24 +44,23 @@ pub async fn status(
     let name = env!("CARGO_PKG_NAME");
     let version = env!("CARGO_PKG_VERSION");
     let git_hash = option_env!("BUILD_GIT_HASH").unwrap_or("unknown");
-    let build_ts = parse_build_ts()
-        .map(|t| t.to_rfc3339())
-        .unwrap_or_else(|| "unknown".to_string());
+    let build_ts = parse_build_ts().map_or_else(|| "unknown".to_string(), |t| t.to_rfc3339());
     let uptime = format_uptime(data.started_at);
 
     let mut out = String::new();
-    out.push_str(&format!("**{name}** v{version}\n"));
-    out.push_str(&format!("commit: `{git_hash}`\n"));
-    out.push_str(&format!("built: `{build_ts}`\n"));
-    out.push_str(&format!("uptime: `{uptime}`\n"));
+    let _ = writeln!(out, "**{name}** v{version}");
+    let _ = writeln!(out, "commit: `{git_hash}`");
+    let _ = writeln!(out, "built: `{build_ts}`");
+    let _ = writeln!(out, "uptime: `{uptime}`");
 
     #[cfg(feature = "lavalink")]
     {
         let lavalink_connected = data.lavalink.is_connected().await;
-        out.push_str(&format!(
-            "lavalink: `{}`\n",
+        let _ = writeln!(
+            out,
+            "lavalink: `{}`",
             if lavalink_connected { "connected" } else { "disconnected" }
-        ));
+        );
     }
 
     if verbose {
@@ -74,27 +75,28 @@ pub async fn status(
         let configured_guilds = data.guild_configs.len();
         let started_at = data.started_at.to_rfc3339();
 
-        out.push_str("\n**Build**\n");
-        out.push_str(&format!("rustc: `{rustc}`\n"));
-        out.push_str(&format!("profile: `{profile}`\n"));
-        out.push_str(&format!("target: `{target_os}/{target_arch}`\n"));
 
-        out.push_str("\n**Runtime**\n");
-        out.push_str(&format!("pid: `{pid}`\n"));
-        out.push_str(&format!("started: `{started_at}`\n"));
-        out.push_str(&format!("shard: `{shard_id}`\n"));
-        out.push_str(&format!("guild count (cache): `{guild_count}`\n"));
-        out.push_str(&format!("configured guilds: `{configured_guilds}`\n"));
+        let _ = write!(out, "\n**Build**\n");
+        let _ = writeln!(out, "rustc: `{rustc}`");
+        let _ = writeln!(out, "profile: `{profile}`");
+        let _ = writeln!(out, "target: `{target_os}/{target_arch}`");
+
+        let _ = write!(out, "\n**Runtime**\n");
+        let _ = writeln!(out, "pid: `{pid}`");
+        let _ = writeln!(out, "started: `{started_at}`");
+        let _ = writeln!(out, "shard: `{shard_id}`");
+        let _ = writeln!(out, "guild count (cache): `{guild_count}`");
+        let _ = writeln!(out, "configured guilds: `{configured_guilds}`");
 
         #[cfg(feature = "lavalink")]
         {
             let lava_cfg = data.lavalink.config().await;
             let lava_node_count = data.lavalink.node_count().await;
 
-            out.push_str("\n**Lavalink**\n");
-            out.push_str(&format!("host: `{}`\n", lava_cfg.hostname));
-            out.push_str(&format!("ssl: `{}`\n", lava_cfg.is_ssl));
-            out.push_str(&format!("active nodes: `{lava_node_count}`\n"));
+            let _ = write!(out, "\n**Lavalink**\n");
+            let _ = writeln!(out, "host: `{}`", lava_cfg.hostname);
+            let _ = writeln!(out, "ssl: `{}`", lava_cfg.is_ssl);
+            let _ = writeln!(out, "active nodes: `{lava_node_count}`");
         }
     }
 
@@ -123,8 +125,8 @@ mod tests {
     fn uptime_formats_reasonably() {
         let started = Utc::now() - chrono::Duration::seconds(3 * 3600 + 12 * 60 + 5);
         let s = format_uptime(started);
-        assert!(s.contains("h"));
-        assert!(s.contains("m"));
-        assert!(s.contains("s"));
+        assert!(s.contains('h'));
+        assert!(s.contains('m'));
+        assert!(s.contains('s'));
     }
 }

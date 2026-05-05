@@ -8,6 +8,7 @@
 //! collapses to a single live message per slot (`NowPlaying`, `QueueView`,
 //! `Status`) and the invoker's prefix message is cleaned up when possible.
 
+use std::fmt::Write;
 use crate::music_backend::{PlayResult, Track};
 use crate::reply::{self, Reply, Slot};
 use crate::{Context, Error};
@@ -15,7 +16,7 @@ use crate::{Context, Error};
 use poise::serenity_prelude as serenity;
 use serenity::{CreateEmbed, Mentionable};
 
-const MUSIC_EMBED_COLOR: u32 = 0x1DB954;
+const MUSIC_EMBED_COLOR: u32 = 0x001D_B954;
 const QUEUE_MAX_SHOWN: usize = 10;
 
 fn music_embed(title: impl Into<String>, description: impl Into<String>) -> CreateEmbed {
@@ -329,11 +330,10 @@ pub async fn play_file(
 }
 
 fn is_audio_attachment(a: &serenity::Attachment) -> bool {
-    if let Some(ct) = a.content_type.as_deref() {
-        if ct.starts_with("audio/") {
+    if let Some(ct) = a.content_type.as_deref()
+        && ct.starts_with("audio/") {
             return true;
         }
-    }
     let name = a.filename.to_ascii_lowercase();
     matches!(
         name.rsplit('.').next(),
@@ -358,14 +358,14 @@ pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
 
     let mut body = format!("**Now playing:** {np_line}\n");
     if total == 0 {
-        body.push_str("\nQueue is empty.");
+        let _ = write!(body, "\nQueue is empty.");
     } else {
-        body.push_str(&format!("\n**Up next ({total} track(s)):**\n"));
+        let _ = write!(body, "\n**Up next ({total} track(s)):**\n");
         for (i, t) in tracks.iter().take(QUEUE_MAX_SHOWN).enumerate() {
-            body.push_str(&format!("{}. {}\n", i + 1, track_line(t)));
+            let _ = writeln!(body, "{}. {}", i + 1, track_line(t));
         }
         if total > QUEUE_MAX_SHOWN {
-            body.push_str(&format!("…and {} more", total - QUEUE_MAX_SHOWN));
+            let _ = write!(body, "…and {} more", total - QUEUE_MAX_SHOWN);
         }
     }
 

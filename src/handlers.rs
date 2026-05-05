@@ -1,5 +1,7 @@
 use crate::EVENT_TARGET;
 use poise::serenity_prelude::{self as serenity, Context, EventHandler, Guild, GuildId, Ready};
+
+use core::fmt;
 use tracing::{info, warn};
 
 pub struct Handler;
@@ -51,6 +53,15 @@ impl EventHandler for Handler {
     }
 }
 
+/// Debug implementation for Handler, includes no fields
+/// since they aren't usually printable anyhow.
+impl fmt::Debug for Handler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Handler")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,9 +69,9 @@ mod tests {
     // Test the Handler struct can be created
     #[test]
     fn test_handler_creation() {
-        let _handler = Handler;
-        let _another_handler = Handler;
-        assert!(true, "Handler can be created");
+        let handler = Handler;
+        let handler_ref = &handler;
+        assert!(true, "Handler can be created: {:?}", handler_ref);
     }
 
     // Since we can't easily mock Context and Ready objects due to their complex structure,

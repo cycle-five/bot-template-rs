@@ -72,6 +72,8 @@ impl LavalinkConfig {
 pub struct LavalinkBackend {
     config: Arc<RwLock<LavalinkConfig>>,
     client: Arc<RwLock<Option<LavalinkClient>>>,
+    #[cfg(feature = "music-core")]
+    http: reqwest::Client,
 }
 
 impl LavalinkBackend {
@@ -80,6 +82,8 @@ impl LavalinkBackend {
         Self {
             config: Arc::new(RwLock::new(config)),
             client: Arc::new(RwLock::new(None)),
+            #[cfg(feature = "music-core")]
+            http: reqwest::Client::new(),
         }
     }
 
@@ -140,12 +144,11 @@ impl LavalinkBackend {
 
         // Verify reachability — `new` is lazy and will not fail if the node
         // is offline; hit its HTTP version endpoint to be sure.
-        if let Some(node) = client.get_node_by_index(0usize) {
-            if let Err(e) = node.http.version().await {
+        if let Some(node) = client.get_node_by_index(0usize)
+            && let Err(e) = node.http.version().await {
                 warn!(target: "bot_template_rs::lavalink", error = %e, "Lavalink node unreachable");
                 return Err(format!("Lavalink node unreachable: {e}"));
             }
-        }
 
         *self.client.write().await = Some(client);
         info!(target: "bot_template_rs::lavalink", "Lavalink connected");
@@ -171,6 +174,77 @@ impl LavalinkBackend {
             .get_player_context(guild)
             .ok_or_else(|| "join the bot to a voice channel first".into())
     }
+
+    /// Resolve a `YouTube` video title via the public oEmbed endpoint. No auth,
+    /// no API key. Used by the title-search fallback when a direct URL load
+    /// fails playabilityStatus checks on the Lavalink node.
+    #[cfg(feature = "music-core")]
+    async fn resolve_youtube_title(&self, video_id: &str) -> Option<(String, String)> {
+        let url = format!(
+            "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        );
+        let resp = self.http.get(&url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: serde_json::Value = resp.json().await.ok()?;
+        let title = json.get("title")?.as_str()?.to_string();
+        let author = json
+            .get("author_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        Some((title, author))
+    }
+}
+
+/// Extract the video ID from a `YouTube` URL. Recognizes `youtube.com/watch?v=`,
+/// `youtu.be/`, `youtube.com/shorts/`, `youtube.com/embed/`, `youtube.com/v/`,
+/// and `music.youtube.com` / `m.youtube.com` variants. Returns `None` for any
+/// other host or non-URL input.
+#[cfg(feature = "music-core")]
+fn youtube_video_id(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path_q) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.trim_start_matches("www.");
+
+    let id = match host {
+        "youtu.be" => path_q.split(['?', '&', '#']).next().unwrap_or(""),
+        "youtube.com" | "music.youtube.com" | "m.youtube.com" => {
+            let (path, query) = path_q.split_once('?').unwrap_or((path_q, ""));
+            if path == "watch" {
+                query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("v="))
+                    .unwrap_or("")
+            } else if let Some(rest) = path
+                .strip_prefix("shorts/")
+                .or_else(|| path.strip_prefix("embed/"))
+                .or_else(|| path.strip_prefix("v/"))
+            {
+                rest.split('/').next().unwrap_or("")
+            } else {
+                ""
+            }
+        }
+        _ => "",
+    };
+
+    (!id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+    .then(|| id.to_string())
+}
+
+/// Mirror of the catch-all arm in [`LavalinkBackend::play`]'s match on
+/// `loaded.data`: returns `true` for shapes that should trigger the
+/// title-search fallback (Lavalink Empty or Error load types).
+#[cfg(all(test, feature = "music-core"))]
+fn should_fallback_to_search(data: &Option<TrackLoadData>) -> bool {
+    matches!(data, None | Some(TrackLoadData::Error(_)))
 }
 
 #[cfg(feature = "music-core")]
@@ -274,6 +348,7 @@ impl MusicBackend for LavalinkBackend {
         };
 
         let loaded = client.load_tracks(guild, &resolved_query).await?;
+        let mut resolved_via_search = false;
 
         let (mut lav_tracks, summary) = match loaded.data {
             Some(TrackLoadData::Track(t)) => {
@@ -300,24 +375,66 @@ impl MusicBackend for LavalinkBackend {
                     pl.tracks.into_iter().map(TrackInQueue::from).collect();
                 (lav, PlayResult::Playlist { name, count, first })
             }
-            _ => return Ok(PlayResult::NoMatch),
+            _ => {
+                if let Some(TrackLoadData::Error(ref e)) = loaded.data {
+                    tracing::debug!(
+                        target: "bot_template_rs::lavalink",
+                        severity = %e.severity,
+                        cause = %e.cause,
+                        "Lavalink load failed; attempting title-search fallback"
+                    );
+                }
+                let Some(video_id) = youtube_video_id(&resolved_query) else {
+                    return Ok(PlayResult::NoMatch);
+                };
+                let Some((title, author)) = self.resolve_youtube_title(&video_id).await else {
+                    tracing::warn!(
+                        target: "bot_template_rs::lavalink",
+                        video_id = %video_id,
+                        "oEmbed title resolution failed"
+                    );
+                    return Ok(PlayResult::NoMatch);
+                };
+                let search_query = format!("ytsearch:{title} {author}");
+                tracing::info!(
+                    target: "bot_template_rs::lavalink",
+                    video_id = %video_id,
+                    query = %search_query,
+                    "Title-search fallback firing"
+                );
+                let fallback = client.load_tracks(guild, &search_query).await?;
+                let first = match fallback.data {
+                    Some(TrackLoadData::Search(list)) => list.into_iter().next(),
+                    Some(TrackLoadData::Track(t)) => Some(t),
+                    _ => None,
+                };
+                let Some(first) = first else {
+                    return Ok(PlayResult::NoMatch);
+                };
+                resolved_via_search = true;
+                let display = track_from_lavalink(&first);
+                (vec![TrackInQueue::from(first)], PlayResult::Added(display))
+            }
         };
 
         for i in &mut lav_tracks {
-            i.track.user_data = Some(serde_json::json!({"requester_id": requester.get()}));
+            let mut ud = serde_json::json!({"requester_id": requester.get()});
+            if resolved_via_search {
+                ud["resolved_via"] = serde_json::Value::String("title_search".into());
+            }
+            i.track.user_data = Some(ud);
         }
 
         let queue = player.get_queue();
         queue.append(lav_tracks.into())?;
 
         // Start playback if idle.
-        if let Ok(player_data) = player.get_player().await {
-            if player_data.track.is_none()
+        if let Ok(player_data) = player.get_player().await
+            && player_data.track.is_none()
                 && queue.get_track(0).await.is_ok_and(|x| x.is_some())
             {
                 player.skip()?;
             }
-        }
 
         Ok(summary)
     }
@@ -332,6 +449,8 @@ impl MusicBackend for LavalinkBackend {
         let player = self.player(guild).await?;
 
         let loaded = client.load_tracks(guild, url).await?;
+        let mut resolved_via_search = false;
+
         let (mut lav_tracks, summary) = match loaded.data {
             Some(TrackLoadData::Track(t)) => {
                 let display = track_from_lavalink(&t);
@@ -357,23 +476,65 @@ impl MusicBackend for LavalinkBackend {
                     pl.tracks.into_iter().map(TrackInQueue::from).collect();
                 (lav, PlayResult::Playlist { name, count, first })
             }
-            _ => return Ok(PlayResult::NoMatch),
+            _ => {
+                if let Some(TrackLoadData::Error(ref e)) = loaded.data {
+                    tracing::debug!(
+                        target: "bot_template_rs::lavalink",
+                        severity = %e.severity,
+                        cause = %e.cause,
+                        "Lavalink load failed; attempting title-search fallback"
+                    );
+                }
+                let Some(video_id) = youtube_video_id(url) else {
+                    return Ok(PlayResult::NoMatch);
+                };
+                let Some((title, author)) = self.resolve_youtube_title(&video_id).await else {
+                    tracing::warn!(
+                        target: "bot_template_rs::lavalink",
+                        video_id = %video_id,
+                        "oEmbed title resolution failed"
+                    );
+                    return Ok(PlayResult::NoMatch);
+                };
+                let search_query = format!("ytsearch:{title} {author}");
+                tracing::info!(
+                    target: "bot_template_rs::lavalink",
+                    video_id = %video_id,
+                    query = %search_query,
+                    "Title-search fallback firing"
+                );
+                let fallback = client.load_tracks(guild, &search_query).await?;
+                let first = match fallback.data {
+                    Some(TrackLoadData::Search(list)) => list.into_iter().next(),
+                    Some(TrackLoadData::Track(t)) => Some(t),
+                    _ => None,
+                };
+                let Some(first) = first else {
+                    return Ok(PlayResult::NoMatch);
+                };
+                resolved_via_search = true;
+                let display = track_from_lavalink(&first);
+                (vec![TrackInQueue::from(first)], PlayResult::Added(display))
+            }
         };
 
         for i in &mut lav_tracks {
-            i.track.user_data = Some(serde_json::json!({"requester_id": requester.get()}));
+            let mut ud = serde_json::json!({"requester_id": requester.get()});
+            if resolved_via_search {
+                ud["resolved_via"] = serde_json::Value::String("title_search".into());
+            }
+            i.track.user_data = Some(ud);
         }
 
         let queue = player.get_queue();
         queue.append(lav_tracks.into())?;
 
-        if let Ok(player_data) = player.get_player().await {
-            if player_data.track.is_none()
+        if let Ok(player_data) = player.get_player().await
+            && player_data.track.is_none()
                 && queue.get_track(0).await.is_ok_and(|x| x.is_some())
             {
                 player.skip()?;
             }
-        }
 
         Ok(summary)
     }
@@ -428,6 +589,7 @@ impl MusicBackend for LavalinkBackend {
 
 /// Admin-only parent command for configuring and connecting Lavalink at
 /// runtime.
+#[allow(clippy::unused_async)]
 #[poise::command(
     slash_command,
     prefix_command,
@@ -606,5 +768,103 @@ mod tests {
         let got = b.config().await;
         assert_eq!(got.hostname, new_cfg.hostname);
         assert!(got.is_ssl);
+    }
+
+    #[cfg(feature = "music-core")]
+    #[test]
+    fn youtube_video_id_recognizes_standard_watch() {
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+        assert_eq!(
+            youtube_video_id("https://youtube.com/watch?v=dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[cfg(feature = "music-core")]
+    #[test]
+    fn youtube_video_id_recognizes_short_form() {
+        assert_eq!(
+            youtube_video_id("https://youtu.be/dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+        assert_eq!(
+            youtube_video_id("https://youtu.be/dQw4w9WgXcQ?si=abc123"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[cfg(feature = "music-core")]
+    #[test]
+    fn youtube_video_id_recognizes_shorts_and_embed() {
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/v/dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[cfg(feature = "music-core")]
+    #[test]
+    fn youtube_video_id_recognizes_music_and_mobile() {
+        assert_eq!(
+            youtube_video_id("https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=foo"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+        assert_eq!(
+            youtube_video_id("https://m.youtube.com/watch?v=dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[cfg(feature = "music-core")]
+    #[test]
+    fn youtube_video_id_strips_extra_query_params() {
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10s"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[cfg(feature = "music-core")]
+    #[test]
+    fn youtube_video_id_rejects_non_youtube() {
+        assert!(youtube_video_id("https://soundcloud.com/foo/bar").is_none());
+        assert!(youtube_video_id("https://example.com/watch?v=abc").is_none());
+        assert!(youtube_video_id("https://www.youtube.com/").is_none());
+        assert!(youtube_video_id("https://www.youtube.com/feed/trending").is_none());
+        assert!(youtube_video_id("not a url").is_none());
+        assert!(youtube_video_id("ytsearch:rick astley").is_none());
+        assert!(youtube_video_id("").is_none());
+    }
+
+    #[cfg(feature = "music-core")]
+    #[test]
+    fn should_fallback_to_search_predicate() {
+        use lavalink_rs::model::track::{TrackData, TrackError};
+
+        assert!(should_fallback_to_search(&None));
+        assert!(should_fallback_to_search(&Some(TrackLoadData::Error(
+            TrackError {
+                message: "fail".into(),
+                severity: "common".into(),
+                cause: "playabilityStatus".into(),
+            }
+        ))));
+        assert!(!should_fallback_to_search(&Some(TrackLoadData::Track(
+            TrackData::default()
+        ))));
+        assert!(!should_fallback_to_search(&Some(TrackLoadData::Search(
+            vec![]
+        ))));
     }
 }

@@ -129,7 +129,7 @@ impl std::fmt::Debug for Data {
             .field("guild_configs", &self.guild_configs)
             .field("cache", &self.cache)
             .field("started_at", &self.started_at)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -205,14 +205,13 @@ impl Data {
 
         let data = Self::new();
 
-        if let Ok(file_content) = tokio::fs::read_to_string(CONFIG_FILE).await {
-            if let Ok(configs) = serde_yaml::from_str::<Vec<GuildConfig>>(&file_content) {
+        if let Ok(file_content) = tokio::fs::read_to_string(CONFIG_FILE).await
+            && let Ok(configs) = serde_yaml::from_str::<Vec<GuildConfig>>(&file_content) {
                 for config in configs {
                     let guild_id = serenity::GuildId::new(config.guild_id);
                     data.guild_configs.insert(guild_id, config);
                 }
             }
-        }
 
         #[cfg(feature = "lavalink")]
         {

@@ -129,8 +129,8 @@ pub async fn send(
     let http = ctx.serenity_context().http.clone();
     let guild_id = ctx.guild_id();
 
-    if let (Some(slot), Some(gid)) = (reply.slot.as_ref(), guild_id) {
-        if let Some((_, old)) = ctx.data().tracked_messages.remove(&(gid, slot.clone())) {
+    if let (Some(slot), Some(gid)) = (reply.slot.as_ref(), guild_id)
+        && let Some((_, old)) = ctx.data().tracked_messages.remove(&(gid, slot.clone())) {
             let http_clone = http.clone();
             tokio::spawn(async move {
                 if let Err(e) = old.delete(&http_clone).await {
@@ -142,10 +142,9 @@ pub async fn send(
                 }
             });
         }
-    }
 
-    if reply.delete_invoker {
-        if let poise::Context::Prefix(pctx) = ctx {
+    if reply.delete_invoker
+        && let poise::Context::Prefix(pctx) = ctx {
             let msg = pctx.msg.clone();
             let http_clone = http.clone();
             tokio::spawn(async move {
@@ -159,7 +158,6 @@ pub async fn send(
                 }
             });
         }
-    }
 
     let mut create = CreateReply::default().ephemeral(reply.ephemeral);
     if let Some(c) = reply.content {
