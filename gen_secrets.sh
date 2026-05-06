@@ -12,4 +12,4 @@ python3 -c '
     "client_id": "0",                                             
     "token_uri": "https://oauth2.googleapis.com/token"                                                                                                                    
   }, sys.stdout)' >secrets/dummy-sa.json
-echo "secrets/" >>.gitignore
+grep -qxF "secrets/" .gitignore 2>/dev/null || echo "secrets/" >>.gitignore
