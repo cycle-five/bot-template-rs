@@ -1,5 +1,5 @@
 use crate::EVENT_TARGET;
-#[cfg(feature = "music-core")]
+#[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
 use crate::Data;
 use poise::serenity_prelude::{self as serenity, Context, EventHandler, FullEvent};
 
@@ -25,7 +25,7 @@ impl EventHandler for Handler {
                 );
                 // Backend startup hook (Lavalink connect, etc.). Failure is
                 // non-fatal — admins can retry via /lavalink connect.
-                #[cfg(feature = "music-core")]
+                #[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
                 {
                     let data = ctx.data::<Data>();
                     if let Err(e) = data.music.on_ready(&ctx.http, data_about_bot.user.id).await {

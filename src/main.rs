@@ -6,7 +6,12 @@ mod handlers;
 #[cfg(feature = "lavalink")]
 mod lavalink;
 mod logging;
-#[cfg(feature = "music-core")]
+// `music` (the user-facing command surface) needs both the backend trait
+// and an actual backend impl. `music-core` alone (e.g. from `playlists`)
+// pulls in only the trait + Track type for serialization. `tts` pulls
+// `native` (songbird's driver for playback) without the command surface,
+// so we require music-core explicitly.
+#[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
 mod music;
 #[cfg(feature = "music-core")]
 mod music_backend;
@@ -15,6 +20,13 @@ mod music_backend;
 // without the music-command layer, so this module stays gated.
 #[cfg(all(feature = "native", feature = "music-core"))]
 mod native_backend;
+// `playlists` adds /playlist save/load/list/feature commands that drive a
+// music backend, so it requires either lavalink or native to be useful.
+#[cfg(all(feature = "playlists", not(any(feature = "lavalink", feature = "native"))))]
+compile_error!(
+    "the `playlists` feature needs a music backend; enable `lavalink` or `native` \
+     (or the `music` / `music-native` bundles)"
+);
 #[cfg(feature = "playlists")]
 mod playlist;
 #[cfg(feature = "radio")]
@@ -53,7 +65,7 @@ fn framework_options(prefix: String) -> poise::FrameworkOptions<Data, Error> {
             let mut v = vec![commands::ping(), commands::register(), status::status()];
             #[cfg(feature = "lavalink")]
             v.push(lavalink::lavalink());
-            #[cfg(feature = "music-core")]
+            #[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
             v.extend([
                 music::join(),
                 music::leave(),

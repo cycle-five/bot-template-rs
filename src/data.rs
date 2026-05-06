@@ -85,9 +85,12 @@ pub struct Data {
     #[cfg(feature = "lavalink")]
     pub lavalink: Arc<LavalinkBackend>,
     /// Backend-agnostic music dispatch. For a Lavalink build this Arc points
-    /// at the same object as `lavalink`; a future `music-native` build would
-    /// point at a `NativeBackend` instead.
-    #[cfg(feature = "music-core")]
+    /// at the same object as `lavalink`; a `music-native` build points at a
+    /// `NativeBackend` instead. Only present when both the music command
+    /// surface (`music-core`) and an actual backend (`lavalink`/`native`)
+    /// are compiled in — `music-core` alone or a backend alone (the latter
+    /// being how `tts` pulls in songbird's driver) skips this.
+    #[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
     pub music: Arc<dyn MusicBackend>,
     /// User-owned playlist persistence. Decoupled from the music backend via
     /// the [`PlaylistStore`] trait.
@@ -172,7 +175,7 @@ impl Data {
             songbird,
             #[cfg(feature = "lavalink")]
             lavalink: lavalink.clone(),
-            #[cfg(feature = "music-core")]
+            #[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
             music,
             #[cfg(feature = "playlists")]
             playlists: Arc::new(YamlPlaylistStore::new("config/playlists")) as Arc<dyn PlaylistStore>,

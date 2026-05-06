@@ -25,6 +25,7 @@ reqwest = { version = "0.13", default-features = false, features = [
   "rustls",
   "json",
   "multipart",
+  "query",
 ], optional = true }
 # Declared directly so we can enable the container/codec features songbird's
 # native driver needs to probe yt-dlp's output (WebM/MKV, Ogg, etc.). Cargo
