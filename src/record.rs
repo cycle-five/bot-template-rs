@@ -75,6 +75,13 @@ pub struct RecordingSession {
     writers: DashMap<u32, std::sync::Mutex<OpusOggWriter>>,
     /// Learned SSRC -> Discord user id mapping (used for file renaming).
     ssrc_to_user: DashMap<u32, u64>,
+    /// Flipped on `/record stop`; the songbird event handler reads this
+    /// before doing any work and returns `Some(Event::Cancel)` to detach
+    /// itself once it sees the flag set. Songbird has no per-handler
+    /// removal API (only `remove_all_global_events`, which would also
+    /// detach handlers installed by other features like radio), so this
+    /// flag is the only way to take just the recorder offline.
+    cancelled: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingSession {
@@ -99,26 +106,36 @@ impl RecordingSession {
             out_dir,
             writers: DashMap::new(),
             ssrc_to_user: DashMap::new(),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn write_opus(&self, ssrc: u32, frame: &[u8]) {
+        // Atomic init: two simultaneous packets for a previously-unseen
+        // SSRC must not both try to create the file. `or_try_insert_with`
+        // serializes the create call per-key.
         if !self.writers.contains_key(&ssrc) {
             let path = self.out_dir.join(format!("ssrc_{ssrc}.ogg"));
-            match OpusOggWriter::create(&path, ssrc) {
-                Ok(w) => {
-                    self.writers.insert(ssrc, std::sync::Mutex::new(w));
-                }
-                Err(e) => {
-                    warn!(
-                        target: "bot_template_rs::record",
-                        error = %e,
-                        path = %path.display(),
-                        "failed to open recording file"
-                    );
-                    return;
-                }
-            }
+            let entry = self.writers.entry(ssrc);
+            entry.or_try_insert_with(|| {
+                OpusOggWriter::create(&path, ssrc).map(std::sync::Mutex::new)
+            }).map_err(|e: std::io::Error| {
+                warn!(
+                    target: "bot_template_rs::record",
+                    error = %e,
+                    path = %path.display(),
+                    "failed to open recording file"
+                );
+            }).ok();
         }
         if let Some(entry) = self.writers.get(&ssrc) {
             if let Ok(mut w) = entry.value().lock() {
@@ -273,6 +290,13 @@ struct RecorderHandler {
 #[async_trait]
 impl EventHandler for RecorderHandler {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        // First check after stop() flips the flag returns Event::Cancel,
+        // which detaches this handler from songbird's global event store
+        // without touching any other feature's handlers (radio's broadcast
+        // handler in particular).
+        if self.session.is_cancelled() {
+            return Some(Event::Cancel);
+        }
         match ctx {
             EventContext::VoiceTick(tick) => {
                 for (ssrc, data) in &tick.speaking {
@@ -515,12 +539,13 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
 
-    // Detach recorder from the songbird Call. `remove_all_global_events`
-    // drops every handler on the call — fine for this template because we
-    // only ever attach recording handlers at the global level.
-    if let Some(call) = ctx.data().songbird.get(guild_id) {
-        call.lock().await.remove_all_global_events();
-    }
+    // Detach this recording's handlers from songbird without touching any
+    // other feature's handlers on the same Call. Flipping the cancel flag
+    // makes the handler return `Event::Cancel` on its next dispatch, which
+    // tells songbird to drop just it. (We can't use
+    // `remove_all_global_events` here — radio also installs global
+    // handlers and we'd silently kill its broadcast.)
+    session.cancel();
 
     let duration = Utc::now() - session.started_at;
     let duration_str = format_duration(duration);
