@@ -77,8 +77,17 @@ impl AudioStore {
         (id, url)
     }
 
+    /// Fetch an entry if it exists and hasn't passed its TTL. Expired
+    /// entries are dropped on the spot rather than waiting for the next
+    /// sweep — otherwise a request that lands between expiry and the next
+    /// sweep tick (up to 30s window) would still get served stale bytes.
     pub fn get(&self, id: &str) -> Option<AudioEntry> {
-        self.entries.get(id).map(|e| e.value().clone())
+        let entry = self.entries.get(id)?.value().clone();
+        if entry.expires_at <= Instant::now() {
+            self.entries.remove(id);
+            return None;
+        }
+        Some(entry)
     }
 
     pub fn sweep(&self) {
@@ -193,5 +202,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         store.sweep();
         assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn get_treats_expired_entries_as_missing() {
+        let store = AudioStore::new(None, Duration::from_millis(0));
+        let (id, _) = store.put(vec![1, 2, 3], "audio/wav");
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(store.get(&id).is_none(), "expired entry should not be served");
+        // Bonus: opportunistic eviction
+        assert_eq!(store.len(), 0, "expired entry should be evicted on get");
     }
 }
