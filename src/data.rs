@@ -73,6 +73,12 @@ pub struct Data {
     pub guild_configs: DashMap<serenity::GuildId, GuildConfig>,
     // Cache from the bot's context, you'll probably need this for some commands
     pub cache: Arc<serenity::Cache>,
+    /// Shared Songbird voice manager. Constructed in `main` and registered
+    /// with serenity so it can dispatch voice gateway events; we hold a clone
+    /// here so backends and commands can drive it without going through
+    /// `ctx`.
+    #[cfg(feature = "voice")]
+    pub songbird: Arc<songbird::Songbird>,
     /// Concrete Lavalink backend handle — used by `/lavalink` admin commands
     /// and shared (via `Arc::clone`) into [`Self::music`] when Lavalink is
     /// the active music backend.
@@ -117,12 +123,6 @@ pub struct Data {
     pub started_at: DateTime<Utc>,
 }
 
-impl Default for Data {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl std::fmt::Debug for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Data")
@@ -136,11 +136,16 @@ impl std::fmt::Debug for Data {
 impl Data {
     // Create a new Data instance
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(
+        #[cfg(feature = "voice")] songbird: Arc<songbird::Songbird>,
+    ) -> Self {
         #[cfg(feature = "lavalink")]
-        let lavalink = Arc::new(LavalinkBackend::new(LavalinkConfig::from_env()));
+        let lavalink = Arc::new(LavalinkBackend::new(
+            LavalinkConfig::from_env(),
+            songbird.clone(),
+        ));
         #[cfg(all(feature = "native", feature = "music-core"))]
-        let native = Arc::new(NativeBackend::new());
+        let native = Arc::new(NativeBackend::new(songbird.clone()));
 
         // Backend selection: when both are compiled in, honor the
         // `MUSIC_BACKEND` env var (lavalink|native); default to lavalink for
@@ -163,6 +168,8 @@ impl Data {
         Self {
             guild_configs: dashmap::DashMap::new(),
             cache: Arc::new(serenity::Cache::default()),
+            #[cfg(feature = "voice")]
+            songbird,
             #[cfg(feature = "lavalink")]
             lavalink: lavalink.clone(),
             #[cfg(feature = "music-core")]
@@ -200,10 +207,15 @@ impl Data {
     ///
     /// Loads guild configurations and the Lavalink configuration from the
     /// config directory. Missing or unreadable files fall back to defaults.
-    pub async fn load() -> Self {
+    pub async fn load(
+        #[cfg(feature = "voice")] songbird: Arc<songbird::Songbird>,
+    ) -> Self {
         const CONFIG_FILE: &str = "config/bot_config.yaml";
 
-        let data = Self::new();
+        let data = Self::new(
+            #[cfg(feature = "voice")]
+            songbird,
+        );
 
         if let Ok(file_content) = tokio::fs::read_to_string(CONFIG_FILE).await
             && let Ok(configs) = serde_yaml::from_str::<Vec<GuildConfig>>(&file_content) {
@@ -329,9 +341,18 @@ impl Data {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "voice")]
+    fn make_data() -> Data {
+        Data::new(songbird::Songbird::serenity())
+    }
+    #[cfg(not(feature = "voice"))]
+    fn make_data() -> Data {
+        Data::new()
+    }
+
     #[tokio::test]
     async fn test_data_new() {
-        let data = Data::new();
+        let data = make_data();
         assert_eq!(data.guild_configs.len(), 0);
         assert!(data.cache.guilds().is_empty());
         #[cfg(feature = "lavalink")]
@@ -347,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_data_debug_impl() {
-        let data = Data::new();
+        let data = make_data();
         let debug_output = format!("{:?}", data);
         assert!(debug_output.contains("Data"));
         assert!(debug_output.contains("guild_configs"));

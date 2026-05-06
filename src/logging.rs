@@ -191,7 +191,11 @@ pub fn log_command_error(error: &FrameworkError<'_, Data, Error>) {
     }
 }
 
-/// Log messages to the console
+/// Log messages to the console.
+///
+/// Currently only used by the test suite — kept public for ad-hoc tracing
+/// from places without ready access to the structured logging targets.
+#[allow(dead_code)]
 pub fn log_console(message: &str) {
     info!(
         target: CONSOLE_TARGET,

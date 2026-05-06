@@ -71,32 +71,18 @@ impl EventHandler for AdvanceOnEnd {
 /// Native backend: native playback via songbird + yt-dlp for resolution.
 pub struct NativeBackend {
     http: reqwest::Client,
-    songbird: Arc<RwLock<Option<Arc<Songbird>>>>,
+    songbird: Arc<Songbird>,
     meta: Arc<DashMap<GuildId, Arc<Mutex<GuildMeta>>>>,
-}
-
-impl Default for NativeBackend {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl NativeBackend {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(songbird: Arc<Songbird>) -> Self {
         Self {
             http: reqwest::Client::new(),
-            songbird: Arc::new(RwLock::new(None)),
+            songbird,
             meta: Arc::new(DashMap::new()),
         }
-    }
-
-    async fn songbird(&self) -> Result<Arc<Songbird>, Error> {
-        self.songbird
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| "songbird not initialized; backend not ready".into())
     }
 
     fn guild_meta(&self, guild: GuildId) -> Arc<Mutex<GuildMeta>> {
@@ -148,47 +134,26 @@ impl MusicBackend for NativeBackend {
         BackendKind::Native
     }
 
-    async fn on_ready(
-        &self,
-        ctx: &serenity::Context,
-        _user_id: UserId,
-    ) -> Result<(), Error> {
-        let manager = songbird::get(ctx)
-            .await
-            .ok_or("songbird not registered")?
-            .clone();
-        *self.songbird.write().await = Some(manager);
-        Ok(())
-    }
-
     async fn ensure_joined(
         &self,
-        ctx: &serenity::Context,
+        _ctx: &serenity::Context,
         guild: GuildId,
         channel: ChannelId,
     ) -> Result<bool, Error> {
-        let manager = songbird::get(ctx)
-            .await
-            .ok_or("songbird not registered")?
-            .clone();
-        if manager.get(guild).is_some() {
+        if self.songbird.get(guild).is_some() {
             return Ok(false);
         }
-        manager.join(guild, channel).await?;
+        self.songbird.join(guild, channel).await?;
         Ok(true)
     }
 
     async fn leave(
         &self,
-        ctx: &serenity::Context,
+        _ctx: &serenity::Context,
         guild: GuildId,
     ) -> Result<(), Error> {
-        let manager = songbird::get(ctx)
-            .await
-            .ok_or("songbird not registered")?
-            .clone();
-        if manager.get(guild).is_some() {
-            manager.remove(guild).await?;
+        if self.songbird.get(guild).is_some() {
+            self.songbird.remove(guild).await?;
         }
         self.meta.remove(&guild);
         Ok(())
@@ -200,8 +165,8 @@ impl MusicBackend for NativeBackend {
         query: &str,
         requester: UserId,
     ) -> Result<PlayResult, Error> {
-        let manager = self.songbird().await?;
-        let call = manager.get(guild).ok_or("not in voice")?;
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        
 
         let mut src = if query.starts_with("http") {
             YoutubeDl::new(self.http.clone(), query.to_string())
@@ -250,8 +215,8 @@ impl MusicBackend for NativeBackend {
         url: &str,
         requester: UserId,
     ) -> Result<PlayResult, Error> {
-        let manager = self.songbird().await?;
-        let call = manager.get(guild).ok_or("not in voice")?;
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        
 
         // Raw HTTP fetch — no yt-dlp, no metadata probe. Synthesize a
         // minimal Track from the URL itself.
@@ -296,8 +261,8 @@ impl MusicBackend for NativeBackend {
     }
 
     async fn skip(&self, guild: GuildId) -> Result<Option<Track>, Error> {
-        let manager = self.songbird().await?;
-        let call = manager.get(guild).ok_or("not in voice")?;
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        
 
         // Snapshot the currently-playing track to return; the AdvanceOnEnd
         // handler will update the live state asynchronously.
@@ -309,8 +274,8 @@ impl MusicBackend for NativeBackend {
     }
 
     async fn stop(&self, guild: GuildId) -> Result<Option<Track>, Error> {
-        let manager = self.songbird().await?;
-        let call = manager.get(guild).ok_or("not in voice")?;
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        
 
         let meta_arc = self.guild_meta(guild);
         let stopped = {
@@ -328,16 +293,16 @@ impl MusicBackend for NativeBackend {
     }
 
     async fn pause(&self, guild: GuildId) -> Result<(), Error> {
-        let manager = self.songbird().await?;
-        let call = manager.get(guild).ok_or("not in voice")?;
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        
         let handler = call.lock().await;
         handler.queue().pause()?;
         Ok(())
     }
 
     async fn resume(&self, guild: GuildId) -> Result<(), Error> {
-        let manager = self.songbird().await?;
-        let call = manager.get(guild).ok_or("not in voice")?;
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        
         let handler = call.lock().await;
         handler.queue().resume()?;
         Ok(())

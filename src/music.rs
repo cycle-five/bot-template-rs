@@ -90,10 +90,7 @@ pub(crate) async fn join_voice(
     guild_id: serenity::GuildId,
     explicit: Option<serenity::ChannelId>,
 ) -> Result<(), Error> {
-    if explicit.is_none()
-        && let Some(manager) = songbird::get(ctx.serenity_context()).await
-        && manager.get(guild_id).is_some()
-    {
+    if explicit.is_none() && ctx.data().songbird.get(guild_id).is_some() {
         return Ok(());
     }
 

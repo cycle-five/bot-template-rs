@@ -29,11 +29,10 @@ mod stt;
 mod tts;
 
 use std::env;
+use std::sync::Arc;
 
 use poise::serenity_prelude::{self as serenity};
 use serenity::GatewayIntents;
-#[cfg(feature = "voice")]
-use songbird::SerenityInit;
 use tracing::{error, info};
 
 // Customize these constants for your bot
@@ -46,114 +45,62 @@ pub use data::Data;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
-/// Build the Poise framework with our commands and options configured.
-fn build_framework(data: Data, prefix: String) -> poise::Framework<Data, Error> {
-    // Configure the Poise framework
-    poise::Framework::builder()
-        .options(poise::FrameworkOptions {
-            commands: {
-                #[allow(unused_mut)]
-                let mut v = vec![commands::ping(), status::status()];
-                #[cfg(feature = "lavalink")]
-                v.push(lavalink::lavalink());
-                #[cfg(feature = "music-core")]
-                v.extend([
-                    music::join(),
-                    music::leave(),
-                    music::play(),
-                    music::play_file(),
-                    music::stop(),
-                    music::pause(),
-                    music::resume(),
-                    music::skip(),
-                    music::queue(),
-                ]);
-                #[cfg(feature = "playlists")]
-                v.push(playlist::playlist());
-                #[cfg(feature = "record")]
-                v.push(record::record());
-                #[cfg(feature = "tts")]
-                v.push(tts::tts());
-                #[cfg(feature = "stt")]
-                {
-                    v.push(stt::stt());
-                    v.push(stt::transcribe_message());
-                }
-                #[cfg(feature = "radio")]
-                v.push(radio::radio());
-                v
-            },
-            pre_command: |ctx| {
-                Box::pin(async move {
-                    // Log the start of command execution
-                    logging::log_command_start(ctx);
-                })
-            },
-            post_command: |ctx| {
-                Box::pin(async move {
-                    // Log the end of command execution
-                    logging::log_command_end(ctx);
-                })
-            },
-            on_error: |error| {
-                Box::pin(async move {
-                    // Log the error using our logging system
-                    crate::logging::log_command_error(&error);
-                })
-            },
-            prefix_options: poise::PrefixFrameworkOptions {
-                prefix: Some(prefix),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .setup(move |ctx, ready, framework| {
-            let data = data.clone();
+/// Build poise FrameworkOptions with our commands and lifecycle hooks.
+fn framework_options(prefix: String) -> poise::FrameworkOptions<Data, Error> {
+    poise::FrameworkOptions {
+        commands: {
+            #[allow(unused_mut)]
+            let mut v = vec![commands::ping(), commands::register(), status::status()];
+            #[cfg(feature = "lavalink")]
+            v.push(lavalink::lavalink());
+            #[cfg(feature = "music-core")]
+            v.extend([
+                music::join(),
+                music::leave(),
+                music::play(),
+                music::play_file(),
+                music::stop(),
+                music::pause(),
+                music::resume(),
+                music::skip(),
+                music::queue(),
+            ]);
+            #[cfg(feature = "playlists")]
+            v.push(playlist::playlist());
+            #[cfg(feature = "record")]
+            v.push(record::record());
+            #[cfg(feature = "tts")]
+            v.push(tts::tts());
+            #[cfg(feature = "stt")]
+            {
+                v.push(stt::stt());
+                v.push(stt::transcribe_message());
+            }
+            #[cfg(feature = "radio")]
+            v.push(radio::radio());
+            v
+        },
+        pre_command: |ctx| {
             Box::pin(async move {
-                logging::log_console(
-                    "Registering commands and return data, this will go away in the next version of poise"
-                );
-                // Register to DISCORD_DEV_GUILD if set (instant propagation,
-                // ideal for iterating on new commands); otherwise globally
-                // (can take up to an hour to appear).
-                match std::env::var("DISCORD_DEV_GUILD")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    Some(guild_id) => {
-                        poise::builtins::register_in_guild(
-                            ctx,
-                            &framework.options().commands,
-                            serenity::GuildId::new(guild_id),
-                        )
-                        .await?;
-                        info!(
-                            target: "bot_template_rs",
-                            guild_id, "Registered commands to dev guild"
-                        );
-                    }
-                    None => {
-                        poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                    }
-                }
-
-                // Fire the backend's on_ready lifecycle hook (Lavalink opens
-                // its control-plane connection here). Failure is non-fatal.
-                #[cfg(feature = "music-core")]
-                if let Err(e) = data.music.on_ready(ctx, ready.user.id).await {
-                    tracing::warn!(
-                        target: "bot_template_rs::music",
-                        error = %e,
-                        "music backend on_ready failed"
-                    );
-                }
-                #[cfg(not(feature = "music-core"))]
-                let _ = ready;
-
-                Ok(data)
+                logging::log_command_start(ctx);
             })
-        })
-        .build()
+        },
+        post_command: |ctx| {
+            Box::pin(async move {
+                logging::log_command_end(ctx);
+            })
+        },
+        on_error: |error| {
+            Box::pin(async move {
+                crate::logging::log_command_error(&error);
+            })
+        },
+        prefix_options: poise::PrefixFrameworkOptions {
+            prefix: Some(prefix.into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 /// Main function to run the bot
@@ -166,37 +113,50 @@ async fn async_main() -> Result<(), Error> {
     logging::init()?;
 
     // Load environment variables
-    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");
+    let token = serenity::Token::from_env("DISCORD_TOKEN")
+        .expect("DISCORD_TOKEN must be set");
     let prefix = env::var("PREFIX").unwrap_or_else(|_| "!".to_string());
+
+    // Build the Songbird voice manager up-front so we can stash an Arc both
+    // in serenity (so it dispatches voice gateway events to it) and in our
+    // own Data (so backends drive playback without going through ctx).
+    //
+    // Radio needs decoded PCM from VoiceTick (default mode only decrypts).
+    // Record is fine with either — it takes the raw Opus payload straight
+    // off the packet. So: enable full decode when radio is compiled in,
+    // otherwise use songbird's defaults.
+    #[cfg(feature = "voice")]
+    let songbird = {
+        #[cfg(feature = "radio")]
+        let sb_config = songbird::Config::default().decode_mode(
+            songbird::driver::DecodeMode::Decode(songbird::driver::DecodeConfig::default()),
+        );
+        #[cfg(not(feature = "radio"))]
+        let sb_config = songbird::Config::default();
+        songbird::Songbird::serenity_from_config(sb_config)
+    };
 
     // Load the bot's data from file
     info!("Loading bot data...");
+    #[cfg(feature = "voice")]
+    let data = Data::load(songbird.clone()).await;
+    #[cfg(not(feature = "voice"))]
     let data = Data::load().await;
     let data_clone = data.clone();
-
-    let framework = build_framework(data, prefix);
 
     // Configure the Serenity client
     let intents = GatewayIntents::non_privileged();
     #[cfg(feature = "music")]
     let intents = intents | GatewayIntents::GUILD_VOICE_STATES;
 
+    let framework = poise::Framework::new(framework_options(prefix));
+
     let client_builder = serenity::ClientBuilder::new(token, intents)
-        .event_handler(handlers::Handler)
-        .framework(framework);
-    // Radio needs decoded PCM from VoiceTick (default mode only decrypts).
-    // Record is fine with either — it takes the raw Opus payload straight
-    // off the packet. So: enable full decode when radio is compiled in,
-    // otherwise use songbird's defaults.
-    #[cfg(all(feature = "voice", feature = "radio"))]
-    let client_builder = {
-        let sb_config = songbird::Config::default().decode_mode(
-            songbird::driver::DecodeMode::Decode(songbird::driver::DecodeConfig::default()),
-        );
-        client_builder.register_songbird_from_config(sb_config)
-    };
-    #[cfg(all(feature = "voice", not(feature = "radio")))]
-    let client_builder = client_builder.register_songbird();
+        .event_handler(Arc::new(handlers::Handler))
+        .framework(Box::new(framework))
+        .data(Arc::new(data) as _);
+    #[cfg(feature = "voice")]
+    let client_builder = client_builder.voice_manager(songbird);
     let mut client = client_builder
         .await
         .expect("Failed to create client");

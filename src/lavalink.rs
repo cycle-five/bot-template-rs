@@ -72,16 +72,18 @@ impl LavalinkConfig {
 pub struct LavalinkBackend {
     config: Arc<RwLock<LavalinkConfig>>,
     client: Arc<RwLock<Option<LavalinkClient>>>,
+    songbird: Arc<songbird::Songbird>,
     #[cfg(feature = "music-core")]
     http: reqwest::Client,
 }
 
 impl LavalinkBackend {
     #[must_use]
-    pub fn new(config: LavalinkConfig) -> Self {
+    pub fn new(config: LavalinkConfig, songbird: Arc<songbird::Songbird>) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
             client: Arc::new(RwLock::new(None)),
+            songbird,
             #[cfg(feature = "music-core")]
             http: reqwest::Client::new(),
         }
@@ -271,7 +273,7 @@ impl MusicBackend for LavalinkBackend {
 
     async fn on_ready(
         &self,
-        _ctx: &serenity::Context,
+        _http: &serenity::Http,
         user_id: UserId,
     ) -> Result<(), Error> {
         // Non-fatal — admins can retry via /lavalink connect.
@@ -287,28 +289,24 @@ impl MusicBackend for LavalinkBackend {
 
     async fn ensure_joined(
         &self,
-        ctx: &serenity::Context,
+        _ctx: &serenity::Context,
         guild: serenity::GuildId,
         channel: serenity::ChannelId,
     ) -> Result<bool, Error> {
         let lava = self.client().await?;
-        let manager = songbird::get(ctx)
-            .await
-            .ok_or("songbird not registered")?
-            .clone();
 
         if lava.get_player_context(guild).is_some() {
             return Ok(false);
         }
 
-        let (sb_info, _) = manager.join_gateway(guild, channel).await?;
+        let (sb_info, _) = self.songbird.join_gateway(guild, channel).await?;
         // lavalink-rs's `songbird` feature is disabled to avoid a second
         // songbird version in the tree, so we convert manually.
         let lava_info = lavalink_rs::model::player::ConnectionInfo {
             endpoint: sb_info.endpoint,
             token: sb_info.token,
             session_id: sb_info.session_id,
-            channel_id: Some(lavalink_rs::model::ChannelId(sb_info.channel_id.0.get())),
+            channel_id: Some(lavalink_rs::model::ChannelId(sb_info.channel_id.get())),
         };
         lava.create_player_context(guild, lava_info).await?;
         Ok(true)
@@ -316,18 +314,14 @@ impl MusicBackend for LavalinkBackend {
 
     async fn leave(
         &self,
-        ctx: &serenity::Context,
+        _ctx: &serenity::Context,
         guild: serenity::GuildId,
     ) -> Result<(), Error> {
         if let Ok(lava) = self.client().await {
             let _ = lava.delete_player(guild).await;
         }
-        let manager = songbird::get(ctx)
-            .await
-            .ok_or("songbird not registered")?
-            .clone();
-        if manager.get(guild).is_some() {
-            manager.remove(guild).await?;
+        if self.songbird.get(guild).is_some() {
+            self.songbird.remove(guild).await?;
         }
         Ok(())
     }
@@ -723,7 +717,7 @@ mod tests {
         assert_eq!(cmd.name, "lavalink");
         assert!(cmd.guild_only);
         assert!(cmd.subcommand_required);
-        let sub_names: Vec<&str> = cmd.subcommands.iter().map(|c| c.name.as_str()).collect();
+        let sub_names: Vec<&str> = cmd.subcommands.iter().map(|c| &*c.name).collect();
         assert!(sub_names.contains(&"show"));
         assert!(sub_names.contains(&"set"));
         assert!(sub_names.contains(&"connect"));
@@ -751,14 +745,16 @@ mod tests {
 
     #[tokio::test]
     async fn backend_starts_disconnected() {
-        let b = LavalinkBackend::new(LavalinkConfig::default());
+        let songbird = songbird::Songbird::serenity();
+        let b = LavalinkBackend::new(LavalinkConfig::default(), songbird);
         assert!(!b.is_connected().await);
         assert_eq!(b.node_count().await, 0);
     }
 
     #[tokio::test]
     async fn backend_set_config_round_trips() {
-        let b = LavalinkBackend::new(LavalinkConfig::default());
+        let songbird = songbird::Songbird::serenity();
+        let b = LavalinkBackend::new(LavalinkConfig::default(), songbird);
         let new_cfg = LavalinkConfig {
             hostname: "example.net:9999".into(),
             password: "p".into(),
