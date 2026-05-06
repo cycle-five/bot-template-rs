@@ -120,6 +120,10 @@ cargo test --no-default-features --features "music music-native playlists record
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module layout, backend
   abstraction, TTS routing, voice recording, persistence, logging.
+- [`docs/FORK_STACK.md`](docs/FORK_STACK.md) — why this bot pins git forks
+  of serenity / songbird / lavalink-rs / stream_lib instead of crates.io
+  releases, the `[patch]` orchestration, and how to keep it building when
+  the upstream `next` branches move.
 
 ## License
 
