@@ -158,7 +158,10 @@ async fn async_main() -> Result<(), Error> {
 
     // Configure the Serenity client
     let intents = GatewayIntents::non_privileged();
-    #[cfg(feature = "music")]
+    // Any voice-touching feature needs voice-state events, not just music.
+    // record/radio/tts on the native side all need to know when users join
+    // and leave the bot's channel.
+    #[cfg(feature = "voice")]
     let intents = intents | GatewayIntents::GUILD_VOICE_STATES;
 
     let framework = poise::Framework::new(framework_options(prefix));
