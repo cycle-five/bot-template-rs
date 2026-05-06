@@ -96,7 +96,13 @@ impl YamlPlaylistStore {
     }
 
     fn path_for(&self, owner: u64, name: &str) -> PathBuf {
-        self.root.join(format!("{}__{}.yaml", owner, slug(name)))
+        // Slug + short hash of the original name. Slug alone collapses
+        // distinct names ("My Playlist!" and "My Playlist?" both → "my_
+        // playlist_") which would silently overwrite each other on disk;
+        // the hash makes the filename injective. Slug is kept in front
+        // for human-readable directory listings.
+        self.root
+            .join(format!("{}__{}-{}.yaml", owner, slug(name), short_hash(name)))
     }
 
     async fn ensure_dir(&self) -> Result<(), Error> {
@@ -115,6 +121,15 @@ fn slug(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// 8-hex-char (32-bit) digest of the original (pre-slug) name. Bolted on
+/// to filenames so distinct names with the same slug don't collide.
+fn short_hash(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
 }
 
 #[async_trait]
@@ -164,11 +179,7 @@ impl PlaylistStore for YamlPlaylistStore {
     async fn list_by_owner(&self, owner: UserId) -> Result<Vec<PlaylistSummary>, Error> {
         self.ensure_dir().await?;
         let prefix = format!("{}__", owner.get());
-        scan_playlists(&self.root, |p| p.owner == owner.get() && {
-            let _ = &prefix;
-            true
-        })
-        .await
+        scan_playlists_filtered(&self.root, &prefix, |p| p.owner == owner.get()).await
     }
 
     async fn list_featured(&self) -> Result<Vec<PlaylistSummary>, Error> {
@@ -197,11 +208,30 @@ async fn scan_playlists<F>(root: &std::path::Path, filter: F) -> Result<Vec<Play
 where
     F: Fn(&Playlist) -> bool,
 {
+    scan_playlists_filtered(root, "", filter).await
+}
+
+/// Variant that skips files whose name doesn't begin with `name_prefix`
+/// before doing any read/parse. The owner-prefixed filename layout
+/// (`<owner>__<slug>-<hash>.yaml`) lets `list_by_owner` skip every other
+/// owner's files entirely instead of opening them just to filter on
+/// `p.owner` afterwards.
+async fn scan_playlists_filtered<F>(
+    root: &std::path::Path,
+    name_prefix: &str,
+    filter: F,
+) -> Result<Vec<PlaylistSummary>, Error>
+where
+    F: Fn(&Playlist) -> bool,
+{
     let mut dir = tokio::fs::read_dir(root).await?;
     let mut out = Vec::new();
     while let Some(entry) = dir.next_entry().await? {
         let name = entry.file_name().to_string_lossy().to_string();
         if !name.ends_with(".yaml") {
+            continue;
+        }
+        if !name_prefix.is_empty() && !name.starts_with(name_prefix) {
             continue;
         }
         if let Ok(content) = tokio::fs::read_to_string(entry.path()).await {
@@ -542,6 +572,37 @@ mod tests {
         assert!(store.delete(owner, "a").await.unwrap());
         assert!(!store.delete(owner, "a").await.unwrap());
         assert!(store.load(owner, "a").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn distinct_names_with_same_slug_dont_collide() {
+        let dir = tempdir().unwrap();
+        let store = YamlPlaylistStore::new(dir.path());
+        let owner = UserId::new(7);
+
+        // Both names slug to the same string ("my_playlist_") but should
+        // land on disk in distinct files.
+        store
+            .save(owner, "My Playlist!", vec![sample_track("a")])
+            .await
+            .unwrap();
+        store
+            .save(owner, "My Playlist?", vec![sample_track("b")])
+            .await
+            .unwrap();
+
+        let bang = store
+            .load(owner, "My Playlist!")
+            .await
+            .unwrap()
+            .expect("first survived");
+        let qmark = store
+            .load(owner, "My Playlist?")
+            .await
+            .unwrap()
+            .expect("second didn't overwrite first");
+        assert_eq!(bang.tracks[0].title, "a");
+        assert_eq!(qmark.tracks[0].title, "b");
     }
 
     #[tokio::test]
