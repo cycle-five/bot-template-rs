@@ -1821,6 +1821,7 @@ dependencies = [
 [[package]]
 name = "lavalink-rs"
 version = "0.15.0"
+source = "git+https://gitlab.com/cycle.five/lavalink-rs?branch=bot-template-experiment#243a51e8912c067c65c6e28223857c5bdfb080ed"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -3567,6 +3568,7 @@ dependencies = [
 [[package]]
 name = "serenity"
 version = "0.12.5"
+source = "git+https://github.com/CycleFive/serenity?branch=next#edbac1e73241ffa83a8a70e7ec725d73e29bf330"
 dependencies = [
  "aformat",
  "arrayvec",
@@ -3757,6 +3759,7 @@ dependencies = [
 [[package]]
 name = "songbird"
 version = "0.6.0"
+source = "git+https://github.com/CycleFive/songbird?branch=bot-template-experiment#8e1aaa40b3c557a8795c8917d7119408a731f2ba"
 dependencies = [
  "aead",
  "aes-gcm",
@@ -3839,6 +3842,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "stream_lib"
 version = "0.5.2"
+source = "git+https://github.com/CycleFive/rsget?branch=bot-template-experiment#f25b40d91b4773dda520cade316419cec5d2f1d6"
 dependencies = [
  "bytes",
  "futures-core",

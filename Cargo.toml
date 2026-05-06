@@ -6,7 +6,7 @@ edition = "2024"
 
 [dependencies]
 dashmap = "6.1.0"
-serenity = { path = "/home/lothrop/code/serenity", default-features = false, features = ["rustls_backend", "voice"] }
+serenity = { git = "https://github.com/CycleFive/serenity", branch = "next", default-features = false, features = ["rustls_backend", "voice"] }
 poise = { git = "https://github.com/serenity-rs/poise", branch = "serenity-next", default-features = false, features = ["cache", "chrono", "handle_panics"] }
 tokio = { version = "1.52.2", features = [
   "rt-multi-thread",
@@ -55,12 +55,12 @@ chrono = { version = "0.4", features = ["serde"] }
 # pulls songbird 0.5, which would produce a second incompatible version in
 # the tree — disable it and construct lavalink `ConnectionInfo` manually in
 # `src/lavalink.rs` instead.
-songbird = { path = "/home/lothrop/code/songbird", default-features = false, features = [
+songbird = { git = "https://github.com/CycleFive/songbird", branch = "bot-template-experiment", default-features = false, features = [
   "gateway",
   "serenity",
   "rustls",
 ], optional = true }
-lavalink-rs = { path = "/home/lothrop/code/lavalink-rs", default-features = false, features = [
+lavalink-rs = { git = "https://gitlab.com/cycle.five/lavalink-rs", branch = "bot-template-experiment", default-features = false, features = [
   "serenity",
   "tungstenite-rustls-webpki-roots",
   "macros",
@@ -133,18 +133,18 @@ radio = ["voice-recv", "songbird/builtin-queue"]
 
 # Redirect every "github.com/serenity-rs/serenity" git source (used by
 # songbird-fork's serenity-next branch, poise's serenity-next branch, and
-# lavalink-rs) to our local fork checkout so the whole tree resolves to a
+# lavalink-rs) to the CycleFive fork so the whole tree resolves to a
 # single serenity package.
 [patch."https://github.com/serenity-rs/serenity"]
-serenity = { path = "/home/lothrop/code/serenity" }
+serenity = { git = "https://github.com/CycleFive/serenity", branch = "next" }
 
-# Same idea for songbird — lavalink-rs pulls songbird via git, redirect to
-# the local fork so we don't end up with two songbird instances.
+# Same idea for songbird — lavalink-rs pulls songbird via git, redirect
+# to the fork so we don't end up with two songbird instances.
 [patch."https://github.com/serenity-rs/songbird"]
-songbird = { path = "/home/lothrop/code/songbird" }
+songbird = { git = "https://github.com/CycleFive/songbird", branch = "bot-template-experiment" }
 
 # stream_lib is pulled in transitively by songbird/driver. Crates.io
 # stream_lib 0.5.2 pins reqwest 0.12, which type-mismatches against the
 # rest of the stack on reqwest 0.13. Our fork bumps it.
 [patch.crates-io]
-stream_lib = { path = "/home/lothrop/code/rsget/stream_lib" }
+stream_lib = { git = "https://github.com/CycleFive/rsget", branch = "bot-template-experiment" }
