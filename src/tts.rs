@@ -268,10 +268,7 @@ pub async fn speak(
     }
 
     // Native/no-music-core path: enqueue raw bytes directly onto songbird.
-    let manager = songbird::get(ctx.serenity_context())
-        .await
-        .ok_or("songbird not registered")?
-        .clone();
+    let manager = ctx.data().songbird.clone();
     let Some(call) = manager.get(guild_id) else {
         reply::send(
             &ctx,
@@ -508,7 +505,7 @@ mod tests {
         assert_eq!(cmd.name, "tts");
         assert!(cmd.guild_only);
         assert!(cmd.subcommand_required);
-        let sub: Vec<&str> = cmd.subcommands.iter().map(|c| c.name.as_str()).collect();
+        let sub: Vec<&str> = cmd.subcommands.iter().map(|c| &*c.name).collect();
         for s in ["speak", "show", "set", "voices"] {
             assert!(sub.contains(&s), "missing {s}");
         }

@@ -413,8 +413,9 @@ pub async fn broadcast(
     #[description = "Station name other guilds use to tune in"] name: String,
     #[description = "Voice channel to broadcast from (default: bot's current or yours)"]
     #[channel_types("Voice")]
-    channel: Option<serenity::ChannelId>,
+    channel: Option<serenity::GenericChannelId>,
 ) -> Result<(), Error> {
+    let channel = channel.map(serenity::GenericChannelId::expect_channel);
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
 
@@ -445,10 +446,7 @@ pub async fn broadcast(
         return Ok(());
     }
 
-    let manager = songbird::get(ctx.serenity_context())
-        .await
-        .ok_or("songbird not registered")?
-        .clone();
+    let manager = ctx.data().songbird.clone();
 
     // Resolve target: explicit arg > existing bot call > invoker's VC.
     let call = if let Some(target) = channel {
@@ -574,8 +572,9 @@ pub async fn tune(
     #[description = "Name of a live station (see /radio stations)"] name: String,
     #[description = "Voice channel to play in (default: bot's current or yours)"]
     #[channel_types("Voice")]
-    channel: Option<serenity::ChannelId>,
+    channel: Option<serenity::GenericChannelId>,
 ) -> Result<(), Error> {
+    let channel = channel.map(serenity::GenericChannelId::expect_channel);
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
 
@@ -606,10 +605,7 @@ pub async fn tune(
         return Ok(());
     }
 
-    let manager = songbird::get(ctx.serenity_context())
-        .await
-        .ok_or("songbird not registered")?
-        .clone();
+    let manager = ctx.data().songbird.clone();
 
     // Resolve target: explicit arg > existing bot call > invoker's VC.
     let call = if let Some(target) = channel {
@@ -745,8 +741,8 @@ pub async fn disable(ctx: Context<'_>) -> Result<(), Error> {
 
 async fn set_broadcast_enabled(ctx: &Context<'_>, enabled: bool) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
-    let mut entry = ctx
-        .data()
+    let data = ctx.data();
+    let mut entry = data
         .guild_configs
         .entry(guild_id)
         .or_insert_with(|| crate::data::GuildConfig {
@@ -840,7 +836,7 @@ mod tests {
         assert_eq!(cmd.name, "radio");
         assert!(cmd.guild_only);
         assert!(cmd.subcommand_required);
-        let sub: Vec<&str> = cmd.subcommands.iter().map(|c| c.name.as_str()).collect();
+        let sub: Vec<&str> = cmd.subcommands.iter().map(|c| &*c.name).collect();
         for s in ["broadcast", "silence", "tune", "unplug", "stations", "enable", "disable"] {
             assert!(sub.contains(&s), "missing {s}");
         }

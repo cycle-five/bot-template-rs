@@ -314,9 +314,9 @@ async fn set_guild_recording_enabled(
     guild: GuildId,
     enabled: bool,
 ) -> Result<(), Error> {
+    let data = ctx.data();
     {
-        let mut entry = ctx
-            .data()
+        let mut entry = data
             .guild_configs
             .entry(guild)
             .or_insert_with(|| GuildConfig {
@@ -325,7 +325,7 @@ async fn set_guild_recording_enabled(
             });
         entry.recording_enabled = enabled;
     }
-    ctx.data().save().await?;
+    data.save().await?;
     Ok(())
 }
 
@@ -434,17 +434,14 @@ pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
 
-    let manager = songbird::get(ctx.serenity_context())
-        .await
-        .ok_or("songbird not registered")?
-        .clone();
+    let manager = ctx.data().songbird.clone();
     let call = manager.get(guild_id).ok_or("not in voice")?;
 
     let session = Arc::new(RecordingSession::new(
         guild_id,
         ctx.author().id,
         voice_channel,
-        ctx.channel_id(),
+        ctx.channel_id().expect_channel(),
     )?);
 
     {
@@ -521,10 +518,8 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     // Detach recorder from the songbird Call. `remove_all_global_events`
     // drops every handler on the call — fine for this template because we
     // only ever attach recording handlers at the global level.
-    if let Some(manager) = songbird::get(ctx.serenity_context()).await {
-        if let Some(call) = manager.get(guild_id) {
-            call.lock().await.remove_all_global_events();
-        }
+    if let Some(call) = ctx.data().songbird.get(guild_id) {
+        call.lock().await.remove_all_global_events();
     }
 
     let duration = Utc::now() - session.started_at;
@@ -554,7 +549,7 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let within_upload_limit = size > 0 && size <= UPLOAD_BYTE_LIMIT;
 
     let send_result: Result<(), Error> = if within_upload_limit {
-        match CreateAttachment::path(&zip_path).await {
+        match CreateAttachment::path(&zip_path) {
             Ok(att) => ctx
                 .channel_id()
                 .send_message(
@@ -702,7 +697,7 @@ mod tests {
         let cmd = record();
         assert_eq!(cmd.name, "record");
         assert!(cmd.guild_only);
-        let names: Vec<&str> = cmd.subcommands.iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<&str> = cmd.subcommands.iter().map(|c| &*c.name).collect();
         for n in ["start", "stop", "disable", "enable"] {
             assert!(names.contains(&n), "missing subcommand: {n}");
         }

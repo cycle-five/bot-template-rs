@@ -298,7 +298,7 @@ async fn transcribe_attachment(
     let opts = TranscribeOpts {
         language,
         prompt,
-        filename: att.filename.clone(),
+        filename: att.filename.to_string(),
     };
     let transcript = match ctx.data().stt.transcribe(&audio, &opts).await {
         Ok(t) => t,
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(cmd.name, "stt");
         assert!(cmd.guild_only);
         assert!(cmd.subcommand_required);
-        let sub: Vec<&str> = cmd.subcommands.iter().map(|c| c.name.as_str()).collect();
+        let sub: Vec<&str> = cmd.subcommands.iter().map(|c| &*c.name).collect();
         for s in ["transcribe", "show", "set"] {
             assert!(sub.contains(&s), "missing {s}");
         }

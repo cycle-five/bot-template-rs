@@ -327,14 +327,14 @@ mod tests {
 
     #[tokio::test]
     async fn new_backend_has_no_guild_state() {
-        let b = NativeBackend::new();
+        let b = NativeBackend::new(songbird::Songbird::serenity());
         // No guild state until a guild is touched.
         assert_eq!(b.meta.len(), 0);
     }
 
     #[tokio::test]
     async fn guild_meta_is_lazily_created() {
-        let b = NativeBackend::new();
+        let b = NativeBackend::new(songbird::Songbird::serenity());
         let g = GuildId::new(1);
         let m1 = b.guild_meta(g);
         let m2 = b.guild_meta(g);
@@ -344,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_snapshot_on_fresh_guild_is_empty() {
-        let b = NativeBackend::new();
+        let b = NativeBackend::new(songbird::Songbird::serenity());
         let g = GuildId::new(1);
         assert!(b.queue_snapshot(g).await.unwrap().is_empty());
         assert!(b.now_playing(g).await.unwrap().is_none());

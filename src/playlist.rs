@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(cmd.name, "playlist");
         assert!(cmd.guild_only);
         assert!(cmd.subcommand_required);
-        let sub_names: Vec<&str> = cmd.subcommands.iter().map(|c| c.name.as_str()).collect();
+        let sub_names: Vec<&str> = cmd.subcommands.iter().map(|c| &*c.name).collect();
         for expected in ["save", "load", "list", "delete", "featured", "feature"] {
             assert!(sub_names.contains(&expected), "missing subcommand {expected}");
         }
