@@ -8,6 +8,15 @@ A feature-rich Discord bot template in Rust, built on
 major capability is behind a cargo feature flag, so you can build a tiny
 command-only bot or the whole kitchen sink.
 
+## Preface
+
+This bot's code started as a minimalist skeleton I used for starting new
+bots with a fresh, concise code base that was free of unneeded dependencies
+and was extensible and had logical ways to exprapolate. It's grown far
+beyond that now, yet I still think it's a great example of micro-service
+focused architecture, effective compile time feature gating, and separation
+of concerns by design.
+
 ## What's in the box
 
 | Capability | Feature flag | Notes |
