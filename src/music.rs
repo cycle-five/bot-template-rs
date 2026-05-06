@@ -19,10 +19,10 @@ use serenity::{CreateEmbed, Mentionable};
 const MUSIC_EMBED_COLOR: u32 = 0x001D_B954;
 const QUEUE_MAX_SHOWN: usize = 10;
 
-fn music_embed(title: impl Into<String>, description: impl Into<String>) -> CreateEmbed {
+fn music_embed(title: impl Into<String>, description: impl Into<String>) -> CreateEmbed<'static> {
     CreateEmbed::new()
-        .title(title)
-        .description(description)
+        .title(title.into())
+        .description(description.into())
         .color(MUSIC_EMBED_COLOR)
 }
 
@@ -50,7 +50,7 @@ async fn status(
     Ok(())
 }
 
-async fn now_playing(ctx: &Context<'_>, embed: CreateEmbed) -> Result<(), Error> {
+async fn now_playing(ctx: &Context<'_>, embed: CreateEmbed<'static>) -> Result<(), Error> {
     reply::send(
         ctx,
         Reply::new()
@@ -130,12 +130,13 @@ pub async fn join(
     ctx: Context<'_>,
     #[description = "The channel to join."]
     #[channel_types("Voice")]
-    channel_id: Option<serenity::ChannelId>,
+    channel_id: Option<serenity::GenericChannelId>,
 ) -> Result<(), Error> {
     // Native songbird's join() waits for the full driver/websocket handshake
     // (can exceed 10s). Lavalink's path is faster but still worth deferring.
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let channel_id = channel_id.map(serenity::GenericChannelId::expect_channel);
     join_voice(&ctx, guild_id, channel_id).await?;
     Ok(())
 }
@@ -161,7 +162,7 @@ pub async fn play(
     ctx: Context<'_>,
     #[description = "Search term or URL"]
     #[rest]
-    term: Option<String>,
+    term: String,
 ) -> Result<(), Error> {
     // Extend Discord's 3s interaction deadline to 15m — yt-dlp/lavalink
     // resolves can easily exceed the default window on playlist URLs or
@@ -174,7 +175,8 @@ pub async fn play(
     // Ensure the bot is in voice before doing anything.
     join_voice(&ctx, guild_id, None).await?;
 
-    let Some(query) = term else {
+    let query = term.trim();
+    if query.is_empty() {
         // No argument: resume if paused and show what's playing. Slash
         // commands must respond within ~3s or Discord shows "application did
         // not respond", so always send something back here.
@@ -193,10 +195,10 @@ pub async fn play(
             }
         }
         return Ok(());
-    };
+    }
 
     let result = match backend
-        .play(guild_id, &query, ctx.author().id)
+        .play(guild_id, query, ctx.author().id)
         .await
     {
         Ok(r) => r,
@@ -292,7 +294,7 @@ pub async fn play_file(
     }
 
     let mut added = 0usize;
-    let mut last_embed: Option<CreateEmbed> = None;
+    let mut last_embed: Option<CreateEmbed<'static>> = None;
     for att in &audio_attachments {
         match backend
             .play_url(guild_id, &att.url, ctx.author().id)

@@ -63,7 +63,7 @@ pub trait MusicBackend: Send + Sync + 'static {
     /// its control-plane connection once the bot's user id is known.
     async fn on_ready(
         &self,
-        _ctx: &serenity::Context,
+        _http: &serenity::Http,
         _user_id: UserId,
     ) -> Result<(), Error> {
         Ok(())

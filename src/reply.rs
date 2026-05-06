@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use poise::CreateReply;
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateAttachment, CreateEmbed, Http, MessageId};
+use serenity::{CreateAttachment, CreateEmbed, GenericChannelId, Http, MessageId};
 use tracing::debug;
 
 use crate::{Context, Error};
@@ -31,21 +31,21 @@ pub enum Slot {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TrackedMessage {
-    pub channel_id: ChannelId,
+    pub channel_id: GenericChannelId,
     pub message_id: MessageId,
 }
 
 impl TrackedMessage {
     pub async fn delete(&self, http: &Http) -> serenity::Result<()> {
-        self.channel_id.delete_message(http, self.message_id).await
+        http.delete_message(self.channel_id, self.message_id, None).await
     }
 }
 
 #[derive(Default)]
 pub struct Reply {
     content: Option<String>,
-    embeds: Vec<CreateEmbed>,
-    attachments: Vec<CreateAttachment>,
+    embeds: Vec<CreateEmbed<'static>>,
+    attachments: Vec<CreateAttachment<'static>>,
     ephemeral: bool,
     slot: Option<Slot>,
     auto_delete: Option<Duration>,
@@ -66,13 +66,13 @@ impl Reply {
     }
 
     #[must_use]
-    pub fn embed(mut self, e: CreateEmbed) -> Self {
+    pub fn embed(mut self, e: CreateEmbed<'static>) -> Self {
         self.embeds.push(e);
         self
     }
 
     #[must_use]
-    pub fn attachment(mut self, a: CreateAttachment) -> Self {
+    pub fn attachment(mut self, a: CreateAttachment<'static>) -> Self {
         self.attachments.push(a);
         self
     }
@@ -148,7 +148,7 @@ pub async fn send(
             let msg = pctx.msg.clone();
             let http_clone = http.clone();
             tokio::spawn(async move {
-                if let Err(e) = msg.delete(&http_clone).await {
+                if let Err(e) = msg.delete(&http_clone, None).await {
                     // Typically missing MANAGE_MESSAGES — intentionally quiet.
                     debug!(
                         target: "bot_template_rs::reply",
