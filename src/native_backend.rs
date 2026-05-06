@@ -41,7 +41,7 @@ use crate::music_backend::{BackendKind, MusicBackend, PlayResult, Track};
 struct GuildMeta {
     /// Parallel metadata for queued tracks (positions match songbird's queue
     /// order, minus the current track). `now_playing` holds the head.
-    queue: Vec<Track>,
+    queue: std::collections::VecDeque<Track>,
     now_playing: Option<Track>,
 }
 
@@ -58,11 +58,7 @@ impl EventHandler for AdvanceOnEnd {
     async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
         if let Some(arc) = self.meta.get(&self.guild) {
             let mut m = arc.value().lock().await;
-            if m.queue.is_empty() {
-                m.now_playing = None;
-            } else {
-                m.now_playing = Some(m.queue.remove(0));
-            }
+            m.now_playing = m.queue.pop_front();
         }
         None
     }
@@ -203,7 +199,7 @@ impl MusicBackend for NativeBackend {
         if queue_len == 1 {
             meta.now_playing = Some(track.clone());
         } else {
-            meta.queue.push(track.clone());
+            meta.queue.push_back(track.clone());
         }
 
         Ok(PlayResult::Added(track))
@@ -254,7 +250,7 @@ impl MusicBackend for NativeBackend {
         if queue_len == 1 {
             meta.now_playing = Some(track.clone());
         } else {
-            meta.queue.push(track.clone());
+            meta.queue.push_back(track.clone());
         }
 
         Ok(PlayResult::Added(track))
@@ -317,7 +313,7 @@ impl MusicBackend for NativeBackend {
     async fn queue_snapshot(&self, guild: GuildId) -> Result<Vec<Track>, Error> {
         let meta_arc = self.guild_meta(guild);
         let meta = meta_arc.lock().await;
-        Ok(meta.queue.clone())
+        Ok(meta.queue.iter().cloned().collect())
     }
 }
 
