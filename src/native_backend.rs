@@ -31,7 +31,7 @@ use serenity::{ChannelId, GuildId, UserId};
 use songbird::Songbird;
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
 use songbird::input::{HttpRequest, Input, YoutubeDl};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::Error;

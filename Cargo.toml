@@ -142,3 +142,9 @@ serenity = { path = "/home/lothrop/code/serenity" }
 # the local fork so we don't end up with two songbird instances.
 [patch."https://github.com/serenity-rs/songbird"]
 songbird = { path = "/home/lothrop/code/songbird" }
+
+# stream_lib is pulled in transitively by songbird/driver. Crates.io
+# stream_lib 0.5.2 pins reqwest 0.12, which type-mismatches against the
+# rest of the stack on reqwest 0.13. Our fork bumps it.
+[patch.crates-io]
+stream_lib = { path = "/home/lothrop/code/rsget/stream_lib" }
