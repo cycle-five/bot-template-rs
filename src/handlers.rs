@@ -68,6 +68,7 @@ mod tests {
 
     // Test the Handler struct can be created
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_handler_creation() {
         let handler = Handler;
         let handler_ref = &handler;
