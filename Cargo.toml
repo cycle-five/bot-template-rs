@@ -6,8 +6,8 @@ edition = "2024"
 
 [dependencies]
 dashmap = "6.1.0"
-serenity = { version = "0.12.5", default-features = false, features = ["rustls_backend", "voice"] }
-poise = "0.6.2"
+serenity = { path = "/home/lothrop/code/serenity", default-features = false, features = ["rustls_backend", "voice"] }
+poise = { git = "https://github.com/serenity-rs/poise", branch = "serenity-next", default-features = false, features = ["cache", "chrono", "handle_panics"] }
 tokio = { version = "1.52.2", features = [
   "rt-multi-thread",
   "fs",
@@ -21,8 +21,8 @@ serde_yaml = "0.9"
 serde_json = { version = "1.0", optional = true }
 dotenvy = "0.15"
 async-trait = "0.1"
-reqwest = { version = "0.12.28", default-features = false, features = [
-  "rustls-tls",
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls",
   "json",
   "multipart",
 ], optional = true }
@@ -55,12 +55,12 @@ chrono = { version = "0.4", features = ["serde"] }
 # pulls songbird 0.5, which would produce a second incompatible version in
 # the tree — disable it and construct lavalink `ConnectionInfo` manually in
 # `src/lavalink.rs` instead.
-songbird = { version = "0.6", default-features = false, features = [
+songbird = { path = "/home/lothrop/code/songbird", default-features = false, features = [
   "gateway",
   "serenity",
   "rustls",
 ], optional = true }
-lavalink-rs = { version = "0.15", default-features = false, features = [
+lavalink-rs = { path = "/home/lothrop/code/lavalink-rs", default-features = false, features = [
   "serenity",
   "tungstenite-rustls-webpki-roots",
   "macros",
@@ -130,3 +130,15 @@ stt = ["record", "dep:reqwest", "dep:serde_json"]
 # flows over Discord's voice servers on both legs — no bot-to-bot
 # transport, no public IP exposure.
 radio = ["voice-recv", "songbird/builtin-queue"]
+
+# Redirect every "github.com/serenity-rs/serenity" git source (used by
+# songbird-fork's serenity-next branch, poise's serenity-next branch, and
+# lavalink-rs) to our local fork checkout so the whole tree resolves to a
+# single serenity package.
+[patch."https://github.com/serenity-rs/serenity"]
+serenity = { path = "/home/lothrop/code/serenity" }
+
+# Same idea for songbird — lavalink-rs pulls songbird via git, redirect to
+# the local fork so we don't end up with two songbird instances.
+[patch."https://github.com/serenity-rs/songbird"]
+songbird = { path = "/home/lothrop/code/songbird" }
