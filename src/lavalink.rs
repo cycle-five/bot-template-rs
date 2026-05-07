@@ -637,9 +637,16 @@ impl MusicBackend for LavalinkBackend {
         if index > items.len() {
             return Ok(None);
         }
-        // Drop the first `index` queued tracks so the next .skip() starts on
-        // the target.
-        let kept: std::collections::VecDeque<_> = items.into_iter().skip(index).collect();
+        // The trait's `index` semantics: "skip past N tracks total". Lavalink
+        // splits playback state into the currently-playing track + an upcoming
+        // queue, so `index` total skips = drop `index - 1` from the upcoming
+        // queue, then `player.skip()` ends the current and pulls the queue
+        // head. saturating_sub guards against the index==0 path being reached
+        // through an alternate code path; we already early-returned above.
+        let kept: std::collections::VecDeque<_> = items
+            .into_iter()
+            .skip(index.saturating_sub(1))
+            .collect();
         queue.replace(kept)?;
         let target = player.get_queue().get_track(0).await?.map(|t| track_from_lavalink(&t.track));
         player.skip()?;
@@ -829,12 +836,13 @@ impl MusicBackend for LavalinkBackend {
         player
             .get_queue()
             .push_to_front(TrackInQueue::from(prev))?;
-        // If something's playing, skip to the previous; if idle, kick playback.
-        if player.get_player().await?.track.is_some() {
-            player.skip()?;
-        } else {
-            player.skip()?;
-        }
+        // skip() ends the current track (if any) and starts the queue head,
+        // which is now the recalled track. Same call serves the idle case:
+        // with no active track, lavalink interprets skip as "start the
+        // queue." Also unpause in case the player was sitting in a paused
+        // state — `previous` should resume playback either way.
+        player.set_pause(false).await?;
+        player.skip()?;
         Ok(Some(display))
     }
 }
@@ -914,14 +922,30 @@ fn track_end_handler(
         match mode {
             LoopMode::Off => {}
             LoopMode::Track => {
-                let _ = player
+                if let Err(e) = player
                     .get_queue()
-                    .push_to_front(lavalink_rs::player_context::TrackInQueue::from(track));
+                    .push_to_front(lavalink_rs::player_context::TrackInQueue::from(track))
+                {
+                    warn!(
+                        target: "bot_template_rs::lavalink",
+                        error = %e,
+                        guild_id = %guild,
+                        "loop=track requeue failed"
+                    );
+                }
             }
             LoopMode::Queue => {
-                let _ = player
+                if let Err(e) = player
                     .get_queue()
-                    .push_to_back(lavalink_rs::player_context::TrackInQueue::from(track));
+                    .push_to_back(lavalink_rs::player_context::TrackInQueue::from(track))
+                {
+                    warn!(
+                        target: "bot_template_rs::lavalink",
+                        error = %e,
+                        guild_id = %guild,
+                        "loop=queue requeue failed"
+                    );
+                }
             }
         }
     })

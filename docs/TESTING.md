@@ -11,26 +11,26 @@ without infrastructure beyond the test harness. Snapshot at 0.1.1.
 | `cargo test --no-default-features --features music-native` | 23 | Native backend exclusive paths |
 | `cargo test --all-features` | 71 | Everything; kitchen sink |
 
-Test density per file:
+Test density per file (post-0.1.1, including this PR's additions):
 
 ```
-12  src/lavalink.rs
+17  src/lavalink.rs
 10  src/playlist.rs
+ 7  src/music.rs
  7  src/stt.rs
  6  src/audio_http.rs
+ 6  src/native_backend.rs
  6  src/record.rs
- 5  src/music.rs
- 5  src/native_backend.rs
+ 5  src/music_backend.rs
  4  src/data.rs
  4  src/tts.rs
  3  src/radio.rs
+ 3  src/reply.rs
  2  src/commands.rs
  2  src/logging.rs
- 2  src/music_backend.rs
  2  src/status.rs
  1  src/handlers.rs
  0  src/main.rs
- 0  src/reply.rs
 ```
 
 ## What we test today
@@ -45,7 +45,7 @@ Test density per file:
   expiry, OggOpus writer produces a valid stream, recording session
   filename safety
 - Constructors: `NativeBackend::new` + lazy guild meta creation,
-  `LavalinkBackend::new`, `Reply` (untested! — see gaps)
+  `LavalinkBackend::new`, `Reply::new` + builder fluency
 
 **Command-shape assertions:**
 Every `mod tests` includes a `*_commands_defined` test that verifies the
@@ -65,17 +65,19 @@ guarantees against accidental rename / removal — cheap and worth keeping.
 These are pure functions with no I/O, no dependencies on Discord state, and
 significant logic. Adding tests for these is high ROI per LOC.
 
-| Function | File | Why it matters |
-|---|---|---|
-| `filter_state_to_lavalink` | lavalink.rs | Speed/pitch/bass-boost translation; off-by-one EQ band ranges, neutral-state collapse |
-| `title_from_url` | native_backend.rs | Filename inference for URL-only tracks; edge cases around query strings, fragments, no extension |
-| `is_audio_attachment` | music.rs | Extension dispatch; case sensitivity, missing extension |
-| `Reply::*` builder | reply.rs | Builder fluency, default state |
-| `FilterState::neutral` / `is_neutral` | music_backend.rs | Trivial but locks the contract |
-| `LoopChoice → LoopMode` | music.rs | Trivial mapping; locks the choice surface |
+| Function | File | Status | Why it matters |
+|---|---|---|---|
+| `filter_state_to_lavalink` | lavalink.rs | ✅ added | Speed/pitch/bass-boost translation; off-by-one EQ band ranges, neutral-state collapse |
+| `track_from_lavalink` | lavalink.rs | ✅ added | Pure conversion + requester-id pickup from `user_data` |
+| `title_from_url` | native_backend.rs | ✅ added | Filename inference for URL-only tracks; query strings, no path |
+| `is_audio_by_type_or_name` | music.rs | ✅ added | Extension dispatch; case sensitivity, missing extension. Required a tiny refactor — extracted from `is_audio_attachment` so the inner check doesn't need a `serenity::Attachment` |
+| `Reply::new` + builder chain | reply.rs | ✅ added | Builder fluency, default state, slot equality |
+| `FilterState::neutral` / `is_neutral` | music_backend.rs | ✅ added | Locks the trivial contract; catches future drift |
+| `LoopMode::default` | music_backend.rs | ✅ added | Locks default = Off |
+| `LoopChoice → LoopMode` | music.rs | ✅ added | Locks the choice surface |
 
-This audit added unit tests for the first three (the larger ones) — see
-`src/lavalink.rs::tests`, `src/native_backend.rs::tests`, `src/music.rs::tests`.
+The 0.1.1 audit added all of the above (14 unit tests across 5 files).
+See the corresponding `mod tests` blocks for the assertions.
 
 ## Gaps — trickier but still feasible
 

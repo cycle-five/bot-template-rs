@@ -474,10 +474,16 @@ impl MusicBackend for NativeBackend {
                 return;
             }
             let drop_count = (index.saturating_sub(1)).min(q.len() - 1);
-            let drained: Vec<_> = q.drain(1..=drop_count).collect();
-            // Stop the dropped tracks per modify_queue's safety contract.
-            for queued in drained {
-                let _ = queued.stop();
+            // `drain(1..=0)` is an invalid inclusive range (start > end) and
+            // panics. With index == 1 (jump to the very next track) drop_count
+            // is 0 and there's nothing to drain — skipping the current is
+            // enough to advance into the target.
+            if drop_count > 0 {
+                let drained: Vec<_> = q.drain(1..=drop_count).collect();
+                // Stop the dropped tracks per modify_queue's safety contract.
+                for queued in drained {
+                    let _ = queued.stop();
+                }
             }
         });
         let _ = handler.queue().skip();
@@ -683,19 +689,30 @@ impl MusicBackend for NativeBackend {
                 return Ok(None);
             }
         };
-        // Re-enqueue at the front by re-using play_url — accepts any URL
-        // songbird's HttpRequest source can handle, including the yt-dlp
-        // direct-URL path most native tracks were resolved from.
+        // Snapshot whether something was actively playing *before* we
+        // enqueue. play_url's "auto-start when queue was empty" branch will
+        // begin playback if we're idle; in that case calling skip() right
+        // after would silently kill the just-started track and leave
+        // nothing playing.
+        let was_playing = self.guild_meta(guild).lock().await.now_playing.is_some();
+
+        // Re-enqueue via play_url — accepts any URL songbird's HttpRequest
+        // source can handle, including the yt-dlp direct-URL path most
+        // native tracks were resolved from.
         let requester = prev.requester.map(UserId::new).unwrap_or(UserId::new(0));
         let _ = self.play_url(guild, &url, requester).await?;
         // play_url appends to the back. Move it to the front via the queue
-        // surgery primitives we already implemented.
+        // surgery primitives we already implemented (no-op if it auto-started
+        // due to an empty queue, in which case it's already the only track).
         let qlen = self.guild_meta(guild).lock().await.queue.len();
         if qlen > 0 {
             self.move_track(guild, qlen - 1, 0).await?;
         }
-        // Skip current to start the previous track immediately.
-        if let Some(call) = self.songbird.get(guild) {
+        // Only skip when something was already playing; otherwise play_url's
+        // auto-start has already kicked off the previous track for us.
+        if was_playing
+            && let Some(call) = self.songbird.get(guild)
+        {
             let handler = call.lock().await;
             let _ = handler.queue().skip();
         }

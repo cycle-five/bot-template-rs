@@ -150,8 +150,13 @@ pub trait MusicBackend: Send + Sync + 'static {
     async fn skip(&self, guild: GuildId) -> Result<Option<Track>, Error>;
 
     /// Stop the currently playing track. Returns the stopped track, if any.
-    /// The queue (upcoming tracks) is **not** drained — callers wanting that
-    /// should call [`clear`] separately.
+    ///
+    /// **Backend variance:** the lavalink backend leaves the upcoming queue
+    /// intact — callers wanting it drained should call [`clear`] separately.
+    /// The native (songbird) backend currently drains the queue as a side
+    /// effect of `TrackQueue::stop`'s contract; aligning this is tracked in
+    /// `docs/ROADMAP.md` under "Native backend gaps". Treat the queue state
+    /// after `/stop` as backend-defined, not as part of the trait contract.
     ///
     /// [`clear`]: Self::clear
     async fn stop(&self, guild: GuildId) -> Result<Option<Track>, Error>;

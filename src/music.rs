@@ -220,7 +220,7 @@ pub async fn play(
     Ok(())
 }
 
-/// Stop the currently playing track. Use /clear to also drain the queue.
+/// Stop playback. Lavalink keeps the queue (use /clear); native drains it.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
@@ -599,6 +599,14 @@ struct LrcLibResponse {
     instrumental: Option<bool>,
 }
 
+/// Process-wide HTTP client used by `/lyrics`. `reqwest::Client` holds a
+/// connection pool internally, so reusing one across invocations avoids
+/// re-establishing TLS to lrclib on every call.
+fn lyrics_http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
 /// Fetch lyrics for the currently playing track via lrclib.net.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn lyrics(ctx: Context<'_>) -> Result<(), Error> {
@@ -612,7 +620,7 @@ pub async fn lyrics(ctx: Context<'_>) -> Result<(), Error> {
     let title = clean_track_title(&np.title);
     let artist = np.author.clone();
     let url = "https://lrclib.net/api/get";
-    let resp = reqwest::Client::new()
+    let resp = lyrics_http()
         .get(url)
         .query(&[("track_name", title.as_str()), ("artist_name", artist.as_str())])
         .send()
