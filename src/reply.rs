@@ -202,3 +202,44 @@ pub async fn send(
 
     Ok(Some(tracked))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_new_is_empty() {
+        let r = Reply::new();
+        assert!(r.content.is_none());
+        assert!(r.embeds.is_empty());
+        assert!(r.attachments.is_empty());
+        assert!(!r.ephemeral);
+        assert!(r.slot.is_none());
+        assert!(r.auto_delete.is_none());
+        assert!(!r.delete_invoker);
+    }
+
+    #[test]
+    fn reply_builder_chains_into_a_complete_payload() {
+        let r = Reply::new()
+            .content("hello")
+            .ephemeral(true)
+            .auto_delete(Duration::from_secs(5))
+            .delete_invoker(true)
+            .slot(Slot::BotStatus);
+        assert_eq!(r.content.as_deref(), Some("hello"));
+        assert!(r.ephemeral);
+        assert_eq!(r.auto_delete, Some(Duration::from_secs(5)));
+        assert!(r.delete_invoker);
+        assert!(matches!(r.slot, Some(Slot::BotStatus)));
+    }
+
+    #[test]
+    fn slot_generic_is_unique_per_label() {
+        let a = Slot::Generic("foo".into());
+        let b = Slot::Generic("foo".into());
+        let c = Slot::Generic("bar".into());
+        assert_eq!(a, b, "same label slots compare equal");
+        assert_ne!(a, c, "different labels don't collide");
+    }
+}

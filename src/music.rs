@@ -220,7 +220,7 @@ pub async fn play(
     Ok(())
 }
 
-/// Stop playback and clear the current track.
+/// Stop playback. Lavalink keeps the queue (use /clear); native drains it.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
@@ -229,6 +229,516 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         Some(t) => now_playing(&ctx, music_embed("Stopped", t.title)).await?,
         None => status(&ctx, "Nothing to stop.", true).await?,
     }
+    Ok(())
+}
+
+/// Drain the upcoming queue. Does not stop the currently playing track.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let cleared = ctx.data().music.queue_snapshot(guild_id).await?.len();
+    ctx.data().music.clear(guild_id).await?;
+    let body = if cleared == 0 {
+        "Queue was already empty.".to_string()
+    } else {
+        format!("Cleared {cleared} track(s) from the queue.")
+    };
+    now_playing(&ctx, music_embed("Cleared", body)).await?;
+    Ok(())
+}
+
+/// Shuffle the upcoming queue. Does not affect the currently playing track.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn shuffle(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let len = ctx.data().music.queue_snapshot(guild_id).await?.len();
+    if len < 2 {
+        status(&ctx, "Need at least 2 tracks queued to shuffle.", true).await?;
+        return Ok(());
+    }
+    ctx.data().music.shuffle(guild_id).await?;
+    now_playing(
+        &ctx,
+        music_embed("Shuffled", format!("Reordered {len} upcoming track(s).")),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Skip ahead to the upcoming track at `index` (0 = next).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn jump(
+    ctx: Context<'_>,
+    #[description = "0-based position in the upcoming queue"] index: u32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let index = index as usize;
+    let qlen = ctx.data().music.queue_snapshot(guild_id).await?.len();
+    if index >= qlen {
+        status(
+            &ctx,
+            &format!("Queue only has {qlen} upcoming track(s)."),
+            true,
+        )
+        .await?;
+        return Ok(());
+    }
+    let target = ctx.data().music.jump(guild_id, index + 1).await?;
+    match target {
+        Some(t) => now_playing(&ctx, music_embed("Jumped", track_line(&t))).await?,
+        None => status(&ctx, "Nothing to jump to.", true).await?,
+    }
+    Ok(())
+}
+
+/// Reorder the queue: move the track at `from` to position `to`.
+#[poise::command(slash_command, prefix_command, guild_only, rename = "move")]
+pub async fn move_track(
+    ctx: Context<'_>,
+    #[description = "0-based source index"] from: u32,
+    #[description = "0-based target index"] to: u32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let from = from as usize;
+    let to = to as usize;
+    let qlen = ctx.data().music.queue_snapshot(guild_id).await?.len();
+    if from >= qlen || to >= qlen {
+        status(
+            &ctx,
+            &format!("Indices must be in 0..{qlen}."),
+            true,
+        )
+        .await?;
+        return Ok(());
+    }
+    if from == to {
+        status(&ctx, "Source and target are the same.", true).await?;
+        return Ok(());
+    }
+    ctx.data().music.move_track(guild_id, from, to).await?;
+    now_playing(
+        &ctx,
+        music_embed("Moved", format!("Track {from} → position {to}.")),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove the queued track at `index` from the upcoming queue.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn remove(
+    ctx: Context<'_>,
+    #[description = "0-based position in the upcoming queue"] index: u32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let index = index as usize;
+    let removed = ctx.data().music.remove_at(guild_id, index).await?;
+    match removed {
+        Some(t) => now_playing(&ctx, music_embed("Removed", track_line(&t))).await?,
+        None => status(&ctx, "No track at that position.", true).await?,
+    }
+    Ok(())
+}
+
+/// Drop duplicate tracks from the queue (keeping the first occurrence).
+#[poise::command(slash_command, prefix_command, guild_only, rename = "removedupes")]
+pub async fn remove_dupes(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let dropped = ctx.data().music.remove_duplicates(guild_id).await?;
+    let body = if dropped == 0 {
+        "No duplicates found.".to_string()
+    } else {
+        format!("Dropped {dropped} duplicate track(s).")
+    };
+    now_playing(&ctx, music_embed("Dedupe", body)).await?;
+    Ok(())
+}
+
+/// Parse a user-supplied timestamp into a Duration.
+///
+/// Accepts:
+/// - bare seconds (`83`)
+/// - `mm:ss` (`1:23`)
+/// - `hh:mm:ss` (`1:02:03`)
+/// - `<n>s` / `<n>m` / `<n>h` suffixes (`83s`, `2m`, `1h`)
+fn parse_timestamp(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(num) = s.strip_suffix('s') {
+        return num.trim().parse::<u64>().ok().map(std::time::Duration::from_secs);
+    }
+    if let Some(num) = s.strip_suffix('m') {
+        return num
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|m| std::time::Duration::from_secs(m * 60));
+    }
+    if let Some(num) = s.strip_suffix('h') {
+        return num
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|h| std::time::Duration::from_secs(h * 3600));
+    }
+    if s.contains(':') {
+        let parts: Vec<&str> = s.split(':').collect();
+        let nums: Option<Vec<u64>> = parts.iter().map(|p| p.parse::<u64>().ok()).collect();
+        let nums = nums?;
+        return match nums.len() {
+            2 => Some(std::time::Duration::from_secs(nums[0] * 60 + nums[1])),
+            3 => Some(std::time::Duration::from_secs(
+                nums[0] * 3600 + nums[1] * 60 + nums[2],
+            )),
+            _ => None,
+        };
+    }
+    s.parse::<u64>().ok().map(std::time::Duration::from_secs)
+}
+
+/// Seek the currently playing track to a timestamp.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn seek(
+    ctx: Context<'_>,
+    #[description = "e.g. 1:23, 83, 1:02:03, 90s, 2m"] timestamp: String,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let Some(position) = parse_timestamp(&timestamp) else {
+        status(
+            &ctx,
+            "Couldn't parse timestamp. Try `1:23`, `83`, `1:02:03`, `90s`, `2m`.",
+            true,
+        )
+        .await?;
+        return Ok(());
+    };
+    ctx.data().music.seek(guild_id, position).await?;
+    let secs = position.as_secs();
+    let formatted = if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    };
+    now_playing(&ctx, music_embed("Seek", format!("→ {formatted}"))).await?;
+    Ok(())
+}
+
+/// Choice values for /loop matching the LoopMode enum.
+#[derive(Debug, poise::ChoiceParameter)]
+pub enum LoopChoice {
+    /// Repeat the currently playing track.
+    Track,
+    /// Repeat the queue: finished tracks are added to the back.
+    Queue,
+    /// Disable looping.
+    Off,
+}
+
+impl From<LoopChoice> for crate::music_backend::LoopMode {
+    fn from(c: LoopChoice) -> Self {
+        match c {
+            LoopChoice::Track => Self::Track,
+            LoopChoice::Queue => Self::Queue,
+            LoopChoice::Off => Self::Off,
+        }
+    }
+}
+
+/// Set the loop mode for the current guild.
+#[poise::command(slash_command, prefix_command, guild_only, rename = "loop")]
+pub async fn loop_mode(
+    ctx: Context<'_>,
+    #[description = "track | queue | off"] mode: LoopChoice,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let label = match mode {
+        LoopChoice::Track => "Looping current track",
+        LoopChoice::Queue => "Looping the queue",
+        LoopChoice::Off => "Loop disabled",
+    };
+    ctx.data().music.set_loop(guild_id, mode.into()).await?;
+    now_playing(&ctx, music_embed("Loop", label)).await?;
+    Ok(())
+}
+
+/// Toggle bass boost (lavalink-only). Stacks with /speed and /pitch.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn bassboost(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let mut state = ctx.data().music.get_filters(guild_id).await?;
+    state.bass_boost = !state.bass_boost;
+    let label = if state.bass_boost { "on" } else { "off" };
+    ctx.data().music.set_filters(guild_id, state).await?;
+    now_playing(&ctx, music_embed("Bass boost", format!("Turned {label}."))).await?;
+    Ok(())
+}
+
+/// Toggle nightcore (speed + pitch up; lavalink-only).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn nightcore(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let mut state = ctx.data().music.get_filters(guild_id).await?;
+    let nightcore_active = (state.speed - 1.2).abs() < 0.001 && (state.pitch - 1.2).abs() < 0.001;
+    if nightcore_active {
+        state.speed = 1.0;
+        state.pitch = 1.0;
+        ctx.data().music.set_filters(guild_id, state).await?;
+        now_playing(&ctx, music_embed("Nightcore", "Turned off.")).await?;
+    } else {
+        state.speed = 1.2;
+        state.pitch = 1.2;
+        ctx.data().music.set_filters(guild_id, state).await?;
+        now_playing(&ctx, music_embed("Nightcore", "Turned on.")).await?;
+    }
+    Ok(())
+}
+
+/// Set playback speed (0.5–2.0; lavalink-only).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn speed(
+    ctx: Context<'_>,
+    #[description = "0.5-2.0; 1.0 is default"] multiplier: f32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let m = multiplier.clamp(0.5, 2.0);
+    let mut state = ctx.data().music.get_filters(guild_id).await?;
+    state.speed = m;
+    ctx.data().music.set_filters(guild_id, state).await?;
+    now_playing(&ctx, music_embed("Speed", format!("Set to {m:.2}x."))).await?;
+    Ok(())
+}
+
+/// Set pitch (0.5–2.0; lavalink-only).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn pitch(
+    ctx: Context<'_>,
+    #[description = "0.5-2.0; 1.0 is default"] multiplier: f32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let m = multiplier.clamp(0.5, 2.0);
+    let mut state = ctx.data().music.get_filters(guild_id).await?;
+    state.pitch = m;
+    ctx.data().music.set_filters(guild_id, state).await?;
+    now_playing(&ctx, music_embed("Pitch", format!("Set to {m:.2}x."))).await?;
+    Ok(())
+}
+
+/// Reset all audio filters (lavalink-only).
+#[poise::command(slash_command, prefix_command, guild_only, rename = "filteroff")]
+pub async fn filter_off(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let neutral = crate::music_backend::FilterState::neutral();
+    ctx.data().music.set_filters(guild_id, neutral).await?;
+    now_playing(&ctx, music_embed("Filters", "Cleared.")).await?;
+    Ok(())
+}
+
+/// Strip noise commonly appended to track titles ("Official Video", etc.)
+/// and timestamp tags so search hits land on the underlying song.
+fn clean_track_title(title: &str) -> String {
+    let mut t = title.to_string();
+    // Drop parenthetical/bracketed noise like "(Official Music Video)".
+    let noise = [
+        "official music video",
+        "official video",
+        "music video",
+        "official audio",
+        "lyric video",
+        "lyrics video",
+        "audio",
+        "hd",
+        "remastered",
+        "remaster",
+        "explicit",
+    ];
+    for delim in [('(', ')'), ('[', ']')] {
+        loop {
+            let Some(start) = t.find(delim.0) else { break };
+            let Some(end_rel) = t[start..].find(delim.1) else { break };
+            let end = start + end_rel + 1;
+            let inner = t[start + 1..end - 1].to_lowercase();
+            if noise.iter().any(|n| inner.contains(n)) {
+                t.replace_range(start..end, "");
+            } else {
+                break;
+            }
+        }
+    }
+    t.trim().to_string()
+}
+
+/// Strip leading timestamps like `[00:28.57]` from a lyrics string. lrclib
+/// returns plainLyrics with these annotations sometimes when no truly
+/// timestamp-free version is available.
+fn strip_timestamps(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        let line = line.trim_start();
+        // `[mm:ss.xx]` prefix.
+        let stripped = if let Some(rest) = line.strip_prefix('[') {
+            if let Some(end_rel) = rest.find(']') {
+                rest[end_rel + 1..].trim_start()
+            } else {
+                line
+            }
+        } else {
+            line
+        };
+        out.push_str(stripped);
+        out.push('\n');
+    }
+    out
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LrcLibResponse {
+    #[serde(rename = "plainLyrics")]
+    plain_lyrics: Option<String>,
+    instrumental: Option<bool>,
+}
+
+/// Process-wide HTTP client used by `/lyrics`. `reqwest::Client` holds a
+/// connection pool internally, so reusing one across invocations avoids
+/// re-establishing TLS to lrclib on every call.
+fn lyrics_http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
+/// Fetch lyrics for the currently playing track via lrclib.net.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn lyrics(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let Some(np) = ctx.data().music.now_playing(guild_id).await? else {
+        status(&ctx, "Nothing is playing.", true).await?;
+        return Ok(());
+    };
+    ctx.defer().await?;
+
+    let title = clean_track_title(&np.title);
+    let artist = np.author.clone();
+    let url = "https://lrclib.net/api/get";
+    let resp = lyrics_http()
+        .get(url)
+        .query(&[("track_name", title.as_str()), ("artist_name", artist.as_str())])
+        .send()
+        .await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        status(&ctx, &format!("No lyrics found for `{artist} — {title}`."), true).await?;
+        return Ok(());
+    }
+    if !resp.status().is_success() {
+        status(
+            &ctx,
+            &format!("lrclib returned {} — try again later.", resp.status()),
+            true,
+        )
+        .await?;
+        return Ok(());
+    }
+    let body: LrcLibResponse = resp.json().await?;
+    if body.instrumental.unwrap_or(false) {
+        status(&ctx, &format!("`{title}` is marked instrumental."), true).await?;
+        return Ok(());
+    }
+    let Some(plain) = body.plain_lyrics else {
+        status(
+            &ctx,
+            &format!("`{artist} — {title}` has no plain lyrics on lrclib."),
+            true,
+        )
+        .await?;
+        return Ok(());
+    };
+    let cleaned = strip_timestamps(&plain);
+    // Discord embed description caps at 4096; leave room for ellipsis.
+    let trimmed: String = if cleaned.chars().count() > 3900 {
+        let mut s: String = cleaned.chars().take(3900).collect();
+        s.push_str("\n…(truncated)");
+        s
+    } else {
+        cleaned
+    };
+    let title_text = format!("{artist} — {title}");
+    now_playing(&ctx, music_embed(title_text, trimmed)).await?;
+    Ok(())
+}
+
+/// Replay the most recently finished track.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn previous(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let prev = ctx.data().music.previous(guild_id).await?;
+    match prev {
+        Some(t) => now_playing(&ctx, music_embed("Previous", track_line(&t))).await?,
+        None => status(&ctx, "No track in history yet.", true).await?,
+    }
+    Ok(())
+}
+
+/// Set the playback volume (0-200, default 100).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn volume(
+    ctx: Context<'_>,
+    #[description = "0-200 (percent); 100 is default, anything over 200 is clamped"]
+    level: u16,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let clamped = level.min(200);
+    ctx.data().music.set_volume(guild_id, clamped).await?;
+    now_playing(
+        &ctx,
+        music_embed("Volume", format!("Set to {clamped}%.")),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Drop queued tracks belonging to users no longer in the bot's voice channel.
+#[poise::command(slash_command, prefix_command, guild_only, rename = "leavecleanup")]
+pub async fn leave_cleanup(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+
+    // Find the bot's current voice channel and the users in it. If the bot
+    // isn't in voice, fall back to "users currently in *any* voice channel"
+    // would be wrong — we want callers to clean up only tracks queued by
+    // people who left the listening room.
+    let bot_user_id = ctx.framework().bot_id();
+    let voice_states = ctx
+        .guild()
+        .map(|g| g.voice_states.clone())
+        .unwrap_or_default();
+    let Some(bot_channel) = voice_states
+        .get(&bot_user_id)
+        .and_then(|vs| vs.channel_id)
+    else {
+        status(&ctx, "Bot isn't in a voice channel.", true).await?;
+        return Ok(());
+    };
+    let present: Vec<serenity::UserId> = voice_states
+        .iter()
+        .filter_map(|vs| {
+            if vs.channel_id == Some(bot_channel) {
+                Some(vs.user_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let dropped = ctx
+        .data()
+        .music
+        .leave_cleanup(guild_id, &present)
+        .await?;
+    let body = if dropped == 0 {
+        "Everyone whose tracks are queued is still in the channel.".to_string()
+    } else {
+        format!("Dropped {dropped} track(s) queued by absent users.")
+    };
+    now_playing(&ctx, music_embed("Cleanup", body)).await?;
     Ok(())
 }
 
@@ -329,11 +839,19 @@ pub async fn play_file(
 }
 
 fn is_audio_attachment(a: &serenity::Attachment) -> bool {
-    if let Some(ct) = a.content_type.as_deref()
-        && ct.starts_with("audio/") {
-            return true;
-        }
-    let name = a.filename.to_ascii_lowercase();
+    is_audio_by_type_or_name(a.content_type.as_deref(), &a.filename)
+}
+
+/// Pure inner check used by `is_audio_attachment`. Extracted so it can be
+/// unit-tested without constructing a `serenity::Attachment` (which has
+/// ~15 mandatory fields).
+fn is_audio_by_type_or_name(content_type: Option<&str>, filename: &str) -> bool {
+    if let Some(ct) = content_type
+        && ct.starts_with("audio/")
+    {
+        return true;
+    }
+    let name = filename.to_ascii_lowercase();
     matches!(
         name.rsplit('.').next(),
         Some("wav" | "mp3" | "ogg" | "opus" | "flac" | "m4a" | "aac" | "webm")
@@ -396,6 +914,71 @@ mod tests {
 
         assert!(play().guild_only);
         assert!(skip().guild_only);
+    }
+
+    #[test]
+    fn is_audio_by_type_or_name_dispatches_correctly() {
+        // content-type wins when present.
+        assert!(is_audio_by_type_or_name(Some("audio/mpeg"), "song.bin"));
+        assert!(is_audio_by_type_or_name(Some("audio/ogg"), "anything"));
+        // Falls back to extension when content-type is missing or non-audio.
+        assert!(is_audio_by_type_or_name(None, "track.mp3"));
+        assert!(is_audio_by_type_or_name(None, "Voice.OGG"));
+        assert!(is_audio_by_type_or_name(Some("application/octet-stream"), "x.flac"));
+        // Unsupported extensions and bare files are rejected.
+        assert!(!is_audio_by_type_or_name(None, "video.mp4"));
+        assert!(!is_audio_by_type_or_name(None, "no_extension"));
+        assert!(!is_audio_by_type_or_name(Some("text/plain"), "doc.txt"));
+    }
+
+    #[test]
+    fn loop_choice_maps_to_backend_enum() {
+        use crate::music_backend::LoopMode;
+        assert_eq!(LoopMode::from(LoopChoice::Off), LoopMode::Off);
+        assert_eq!(LoopMode::from(LoopChoice::Track), LoopMode::Track);
+        assert_eq!(LoopMode::from(LoopChoice::Queue), LoopMode::Queue);
+    }
+
+    #[test]
+    fn clean_track_title_strips_youtube_noise() {
+        assert_eq!(
+            clean_track_title("The Less I Know The Better (Official Music Video)"),
+            "The Less I Know The Better"
+        );
+        assert_eq!(
+            clean_track_title("Song Name [Official Audio]"),
+            "Song Name"
+        );
+        // Doesn't strip non-noise parens.
+        assert_eq!(clean_track_title("Song (feat. Artist)"), "Song (feat. Artist)");
+        // Multiple noise tags, stacked.
+        assert_eq!(
+            clean_track_title("Song (Official Video) [HD]"),
+            "Song"
+        );
+    }
+
+    #[test]
+    fn strip_timestamps_drops_lrc_prefixes() {
+        let input = "[00:24.59] Hello\n[00:28.57] World\nNo timestamp here\n";
+        assert_eq!(strip_timestamps(input), "Hello\nWorld\nNo timestamp here\n");
+    }
+
+    #[test]
+    fn parse_timestamp_accepts_all_documented_forms() {
+        use std::time::Duration;
+        assert_eq!(parse_timestamp("83"), Some(Duration::from_secs(83)));
+        assert_eq!(parse_timestamp("1:23"), Some(Duration::from_secs(83)));
+        assert_eq!(parse_timestamp("1:02:03"), Some(Duration::from_secs(3723)));
+        assert_eq!(parse_timestamp("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_timestamp("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_timestamp("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_timestamp("  45  "), Some(Duration::from_secs(45)));
+        // Invalid forms.
+        assert_eq!(parse_timestamp(""), None);
+        assert_eq!(parse_timestamp("abc"), None);
+        assert_eq!(parse_timestamp("1:2:3:4"), None);
+        assert_eq!(parse_timestamp("1:xx"), None);
     }
 
     #[test]

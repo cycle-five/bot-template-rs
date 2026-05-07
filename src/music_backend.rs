@@ -51,6 +51,47 @@ pub enum BackendKind {
     Native,
 }
 
+/// Per-guild loop mode applied at track-end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoopMode {
+    /// No looping; queue advances normally.
+    #[default]
+    Off,
+    /// Re-queue the just-ended track at the front of the queue.
+    Track,
+    /// Push the just-ended track to the back of the queue.
+    Queue,
+}
+
+/// Per-guild audio filter state. Backends translate this to whatever their
+/// native filter representation is — lavalink uses its `Filters` struct;
+/// native (songbird) would need a DSP layer we don't yet have, so the
+/// native backend's `set_filters` returns an error.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FilterState {
+    pub bass_boost: bool,
+    /// Playback speed multiplier (1.0 = default).
+    pub speed: f32,
+    /// Pitch multiplier (1.0 = default).
+    pub pitch: f32,
+}
+
+impl FilterState {
+    /// Default: no filters, speed and pitch at 1.0.
+    pub fn neutral() -> Self {
+        Self {
+            bass_boost: false,
+            speed: 1.0,
+            pitch: 1.0,
+        }
+    }
+
+    pub fn is_neutral(&self) -> bool {
+        !self.bass_boost && (self.speed - 1.0).abs() < f32::EPSILON
+            && (self.pitch - 1.0).abs() < f32::EPSILON
+    }
+}
+
 /// Trait every music backend implements.
 ///
 /// Lifecycle:
@@ -108,14 +149,95 @@ pub trait MusicBackend: Send + Sync + 'static {
     /// Skip the current track. Returns the skipped track, if any.
     async fn skip(&self, guild: GuildId) -> Result<Option<Track>, Error>;
 
-    /// Stop the current track and clear it. Returns the stopped track.
+    /// Stop the currently playing track. Returns the stopped track, if any.
+    ///
+    /// **Backend variance:** the lavalink backend leaves the upcoming queue
+    /// intact — callers wanting it drained should call [`clear`] separately.
+    /// The native (songbird) backend currently drains the queue as a side
+    /// effect of `TrackQueue::stop`'s contract; aligning this is tracked in
+    /// `docs/ROADMAP.md` under "Native backend gaps". Treat the queue state
+    /// after `/stop` as backend-defined, not as part of the trait contract.
+    ///
+    /// [`clear`]: Self::clear
     async fn stop(&self, guild: GuildId) -> Result<Option<Track>, Error>;
+
+    /// Drain the queue of upcoming tracks. Does **not** stop the currently
+    /// playing track.
+    async fn clear(&self, guild: GuildId) -> Result<(), Error>;
 
     async fn pause(&self, guild: GuildId) -> Result<(), Error>;
     async fn resume(&self, guild: GuildId) -> Result<(), Error>;
 
     async fn now_playing(&self, guild: GuildId) -> Result<Option<Track>, Error>;
     async fn queue_snapshot(&self, guild: GuildId) -> Result<Vec<Track>, Error>;
+
+    /// Shuffle the upcoming queue in place. Does not affect the currently
+    /// playing track.
+    async fn shuffle(&self, guild: GuildId) -> Result<(), Error>;
+
+    /// Skip past tracks until the queue head is the track at `index`.
+    /// Returns the now-playing track after the jump, if any. `index = 0`
+    /// is a no-op (already at the head).
+    async fn jump(&self, guild: GuildId, index: usize) -> Result<Option<Track>, Error>;
+
+    /// Move the queued track at `from` to position `to`. Indices are 0-based
+    /// against the upcoming queue (excluding the currently playing track).
+    /// Out-of-range indices return Ok with no effect.
+    async fn move_track(
+        &self,
+        guild: GuildId,
+        from: usize,
+        to: usize,
+    ) -> Result<(), Error>;
+
+    /// Remove the queued track at `index`. Returns the removed track if any.
+    async fn remove_at(&self, guild: GuildId, index: usize) -> Result<Option<Track>, Error>;
+
+    /// Drop duplicate tracks from the queue, keeping the first occurrence
+    /// of each. Tracks with a `uri` dedupe by URI; tracks without dedupe by
+    /// (title, author). Returns the number of tracks dropped.
+    async fn remove_duplicates(&self, guild: GuildId) -> Result<usize, Error>;
+
+    /// Drop queued tracks whose `requester` is not in `present`. Used by
+    /// `/leavecleanup` to prune the queue when the requester left voice.
+    /// Tracks with no recorded requester are kept. Returns the drop count.
+    async fn leave_cleanup(
+        &self,
+        guild: GuildId,
+        present: &[UserId],
+    ) -> Result<usize, Error>;
+
+    /// Seek the currently playing track to `position`.
+    async fn seek(
+        &self,
+        guild: GuildId,
+        position: std::time::Duration,
+    ) -> Result<(), Error>;
+
+    /// Set the player volume. Range is 0–200 (percent), where 100 is the
+    /// default. Backends may clamp differently — lavalink supports up to
+    /// 1000, native (songbird) accepts arbitrary `f32` and we cap at 200
+    /// to keep behavior uniform across the two.
+    async fn set_volume(&self, guild: GuildId, percent: u16) -> Result<(), Error>;
+
+    /// Set the loop mode for the guild. `track` repeats the current track;
+    /// `queue` rotates finished tracks back to the end of the queue.
+    async fn set_loop(&self, guild: GuildId, mode: LoopMode) -> Result<(), Error>;
+
+    /// Get the current loop mode for the guild.
+    async fn get_loop(&self, guild: GuildId) -> Result<LoopMode, Error>;
+
+    /// Re-queue the most recently finished track at the front and start
+    /// playing it. Returns the track that will play, if any. Backends with
+    /// no history return `Ok(None)`.
+    async fn previous(&self, guild: GuildId) -> Result<Option<Track>, Error>;
+
+    /// Set the per-guild audio filter state. Lavalink translates to its
+    /// `Filters` struct; native returns an error (no DSP layer yet).
+    async fn set_filters(&self, guild: GuildId, state: FilterState) -> Result<(), Error>;
+
+    /// Get the current per-guild filter state.
+    async fn get_filters(&self, guild: GuildId) -> Result<FilterState, Error>;
 }
 
 #[cfg(test)]
@@ -140,5 +262,33 @@ mod tests {
     #[test]
     fn backend_is_dyn_compatible() {
         fn _assert(_: &Arc<dyn MusicBackend>) {}
+    }
+
+    #[test]
+    fn filter_state_neutral_is_neutral() {
+        let s = FilterState::neutral();
+        assert!(!s.bass_boost);
+        assert!((s.speed - 1.0).abs() < f32::EPSILON);
+        assert!((s.pitch - 1.0).abs() < f32::EPSILON);
+        assert!(s.is_neutral());
+    }
+
+    #[test]
+    fn filter_state_is_neutral_detects_any_deviation() {
+        let mut s = FilterState::neutral();
+        assert!(s.is_neutral());
+        s.bass_boost = true;
+        assert!(!s.is_neutral());
+        s.bass_boost = false;
+        s.speed = 1.2;
+        assert!(!s.is_neutral());
+        s.speed = 1.0;
+        s.pitch = 0.8;
+        assert!(!s.is_neutral());
+    }
+
+    #[test]
+    fn loop_mode_default_is_off() {
+        assert_eq!(LoopMode::default(), LoopMode::Off);
     }
 }

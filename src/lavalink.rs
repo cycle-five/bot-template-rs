@@ -75,6 +75,27 @@ pub struct LavalinkBackend {
     songbird: Arc<songbird::Songbird>,
     #[cfg(feature = "music-core")]
     http: reqwest::Client,
+    /// Per-guild state the lavalink-side track-end handler reaches into via
+    /// `LavalinkClient::data::<LavalinkSharedState>()`. Lavalink's event
+    /// callbacks are `fn` pointers (not closures), so any state they need has
+    /// to come through that channel.
+    #[cfg(feature = "music-core")]
+    state: Arc<LavalinkSharedState>,
+}
+
+/// State shared between the bot's `LavalinkBackend` and the lavalink event
+/// callbacks. Stored on `LavalinkClient::user_data` and downcasted by the
+/// `track_end` handler.
+#[cfg(feature = "music-core")]
+#[derive(Default)]
+pub(crate) struct LavalinkSharedState {
+    pub loop_modes: dashmap::DashMap<serenity::GuildId, crate::music_backend::LoopMode>,
+    /// Bounded per-guild history of recently-finished tracks. `/previous`
+    /// pops the most recent entry. Capped at 50 to avoid unbounded growth.
+    pub history: dashmap::DashMap<serenity::GuildId, std::collections::VecDeque<lavalink_rs::model::track::TrackData>>,
+    /// Active filter state per guild. Read by `/filter set`/`/bassboost`/etc.
+    /// to merge incrementally; resets to `FilterState::neutral()` lazily.
+    pub filters: dashmap::DashMap<serenity::GuildId, crate::music_backend::FilterState>,
 }
 
 impl LavalinkBackend {
@@ -86,6 +107,8 @@ impl LavalinkBackend {
             songbird,
             #[cfg(feature = "music-core")]
             http: reqwest::Client::new(),
+            #[cfg(feature = "music-core")]
+            state: Arc::new(LavalinkSharedState::default()),
         }
     }
 
@@ -128,19 +151,24 @@ impl LavalinkBackend {
             "Connecting to Lavalink node"
         );
 
+        let evs = events::Events {
+            track_end: Some(track_end_handler),
+            ..Default::default()
+        };
         let node = NodeBuilder {
             hostname: config.hostname.clone(),
             is_ssl: config.is_ssl,
-            events: events::Events::default(),
+            events: evs.clone(),
             password: config.password.clone(),
             user_id: user_id.get().into(),
             session_id: None,
         };
 
-        let client = LavalinkClient::new(
-            events::Events::default(),
+        let client = LavalinkClient::new_with_data(
+            evs,
             vec![node],
             NodeDistributionStrategy::round_robin(),
+            self.state.clone(),
         )
         .await;
 
@@ -555,6 +583,12 @@ impl MusicBackend for LavalinkBackend {
         }
     }
 
+    async fn clear(&self, guild: serenity::GuildId) -> Result<(), Error> {
+        let player = self.player(guild).await?;
+        player.get_queue().clear()?;
+        Ok(())
+    }
+
     async fn pause(&self, guild: serenity::GuildId) -> Result<(), Error> {
         self.player(guild).await?.set_pause(true).await?;
         Ok(())
@@ -575,6 +609,346 @@ impl MusicBackend for LavalinkBackend {
         let items = player.get_queue().get_queue().await?;
         Ok(items.iter().map(|t| track_from_lavalink(&t.track)).collect())
     }
+
+    async fn shuffle(&self, guild: serenity::GuildId) -> Result<(), Error> {
+        use rand::seq::SliceRandom;
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        let mut v: Vec<_> = items.into();
+        v.shuffle(&mut rand::rng());
+        queue.replace(v.into())?;
+        Ok(())
+    }
+
+    async fn jump(
+        &self,
+        guild: serenity::GuildId,
+        index: usize,
+    ) -> Result<Option<Track>, Error> {
+        let player = self.player(guild).await?;
+        if index == 0 {
+            // Already at the head; treat as a no-op skip.
+            let np = player.get_player().await?.track;
+            return Ok(np.as_ref().map(track_from_lavalink));
+        }
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        if index > items.len() {
+            return Ok(None);
+        }
+        // The trait's `index` semantics: "skip past N tracks total". Lavalink
+        // splits playback state into the currently-playing track + an upcoming
+        // queue, so `index` total skips = drop `index - 1` from the upcoming
+        // queue, then `player.skip()` ends the current and pulls the queue
+        // head. saturating_sub guards against the index==0 path being reached
+        // through an alternate code path; we already early-returned above.
+        let kept: std::collections::VecDeque<_> = items
+            .into_iter()
+            .skip(index.saturating_sub(1))
+            .collect();
+        queue.replace(kept)?;
+        let target = player.get_queue().get_track(0).await?.map(|t| track_from_lavalink(&t.track));
+        player.skip()?;
+        Ok(target)
+    }
+
+    async fn move_track(
+        &self,
+        guild: serenity::GuildId,
+        from: usize,
+        to: usize,
+    ) -> Result<(), Error> {
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let mut items = queue.get_queue().await?;
+        if from >= items.len() || to >= items.len() || from == to {
+            return Ok(());
+        }
+        if let Some(item) = items.remove(from) {
+            items.insert(to, item);
+            queue.replace(items)?;
+        }
+        Ok(())
+    }
+
+    async fn remove_at(
+        &self,
+        guild: serenity::GuildId,
+        index: usize,
+    ) -> Result<Option<Track>, Error> {
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        let Some(item) = items.get(index).cloned() else {
+            return Ok(None);
+        };
+        queue.remove(index)?;
+        Ok(Some(track_from_lavalink(&item.track)))
+    }
+
+    async fn remove_duplicates(&self, guild: serenity::GuildId) -> Result<usize, Error> {
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        let original = items.len();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let kept: std::collections::VecDeque<_> = items
+            .into_iter()
+            .filter(|item| {
+                let key = item
+                    .track
+                    .info
+                    .uri
+                    .clone()
+                    .unwrap_or_else(|| {
+                        format!("{}\u{1}{}", item.track.info.title, item.track.info.author)
+                    });
+                seen.insert(key)
+            })
+            .collect();
+        let dropped = original - kept.len();
+        if dropped > 0 {
+            queue.replace(kept)?;
+        }
+        Ok(dropped)
+    }
+
+    async fn leave_cleanup(
+        &self,
+        guild: serenity::GuildId,
+        present: &[UserId],
+    ) -> Result<usize, Error> {
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        let original = items.len();
+        let present_set: std::collections::HashSet<u64> =
+            present.iter().map(|u| u.get()).collect();
+        let kept: std::collections::VecDeque<_> = items
+            .into_iter()
+            .filter(|item| {
+                let requester = item
+                    .track
+                    .user_data
+                    .as_ref()
+                    .and_then(|v| v.get("requester_id"))
+                    .and_then(serde_json::Value::as_u64);
+                match requester {
+                    None => true, // unknown requester: keep
+                    Some(id) => present_set.contains(&id),
+                }
+            })
+            .collect();
+        let dropped = original - kept.len();
+        if dropped > 0 {
+            queue.replace(kept)?;
+        }
+        Ok(dropped)
+    }
+
+    async fn seek(
+        &self,
+        guild: serenity::GuildId,
+        position: std::time::Duration,
+    ) -> Result<(), Error> {
+        let player = self.player(guild).await?;
+        player.set_position(position).await?;
+        Ok(())
+    }
+
+    async fn set_volume(&self, guild: serenity::GuildId, percent: u16) -> Result<(), Error> {
+        // Cap at 200 — anything higher is screech territory and we want
+        // uniform behavior across backends. Lavalink itself accepts up to
+        // 1000.
+        let v = percent.min(200);
+        let player = self.player(guild).await?;
+        player.set_volume(v).await?;
+        Ok(())
+    }
+
+    async fn set_loop(
+        &self,
+        guild: serenity::GuildId,
+        mode: crate::music_backend::LoopMode,
+    ) -> Result<(), Error> {
+        if matches!(mode, crate::music_backend::LoopMode::Off) {
+            self.state.loop_modes.remove(&guild);
+        } else {
+            self.state.loop_modes.insert(guild, mode);
+        }
+        Ok(())
+    }
+
+    async fn get_loop(
+        &self,
+        guild: serenity::GuildId,
+    ) -> Result<crate::music_backend::LoopMode, Error> {
+        Ok(self
+            .state
+            .loop_modes
+            .get(&guild)
+            .map(|r| *r)
+            .unwrap_or_default())
+    }
+
+    async fn set_filters(
+        &self,
+        guild: serenity::GuildId,
+        state: crate::music_backend::FilterState,
+    ) -> Result<(), Error> {
+        let player = self.player(guild).await?;
+        let lav_filters = filter_state_to_lavalink(&state);
+        player.set_filters(lav_filters).await?;
+        if state.is_neutral() {
+            self.state.filters.remove(&guild);
+        } else {
+            self.state.filters.insert(guild, state);
+        }
+        Ok(())
+    }
+
+    async fn get_filters(
+        &self,
+        guild: serenity::GuildId,
+    ) -> Result<crate::music_backend::FilterState, Error> {
+        Ok(self
+            .state
+            .filters
+            .get(&guild)
+            .map(|r| *r)
+            .unwrap_or_else(crate::music_backend::FilterState::neutral))
+    }
+
+    async fn previous(
+        &self,
+        guild: serenity::GuildId,
+    ) -> Result<Option<Track>, Error> {
+        let Some(mut entry) = self.state.history.get_mut(&guild) else {
+            return Ok(None);
+        };
+        let Some(prev) = entry.pop_back() else {
+            return Ok(None);
+        };
+        let display = track_from_lavalink(&prev);
+        drop(entry);
+        let player = self.player(guild).await?;
+        player
+            .get_queue()
+            .push_to_front(TrackInQueue::from(prev))?;
+        // skip() ends the current track (if any) and starts the queue head,
+        // which is now the recalled track. Same call serves the idle case:
+        // with no active track, lavalink interprets skip as "start the
+        // queue." Also unpause in case the player was sitting in a paused
+        // state — `previous` should resume playback either way.
+        player.set_pause(false).await?;
+        player.skip()?;
+        Ok(Some(display))
+    }
+}
+
+/// Translate our backend-agnostic `FilterState` into lavalink's `Filters`
+/// struct. Bass boost is implemented as gains on the lowest 4 EQ bands
+/// (each band covers ~25 Hz / ~31 Hz / ~40 Hz / ~50 Hz). Speed and pitch
+/// map directly to `Timescale.speed` / `Timescale.pitch`.
+#[cfg(feature = "music-core")]
+fn filter_state_to_lavalink(
+    s: &crate::music_backend::FilterState,
+) -> lavalink_rs::model::player::Filters {
+    use lavalink_rs::model::player::{Equalizer, Filters, Timescale};
+    let mut f = Filters::default();
+    if s.bass_boost {
+        f.equalizer = Some(
+            (0..4)
+                .map(|band| Equalizer {
+                    band,
+                    gain: 0.25, // moderate boost; max gain is 1.0
+                })
+                .collect(),
+        );
+    }
+    let speed = s.speed.max(0.1);
+    let pitch = s.pitch.max(0.1);
+    if (speed - 1.0).abs() > f32::EPSILON || (pitch - 1.0).abs() > f32::EPSILON {
+        f.timescale = Some(Timescale {
+            speed: Some(speed.into()),
+            pitch: Some(pitch.into()),
+            rate: None,
+        });
+    }
+    f
+}
+
+/// Lavalink-side track-end callback. Reaches into `LavalinkSharedState`
+/// (stored on the client's `user_data`) for per-guild loop and history
+/// state. Lavalink event hooks are `fn` pointers, not closures, so we
+/// can't capture the backend Arc directly.
+fn track_end_handler(
+    client: lavalink_rs::client::LavalinkClient,
+    _session_id: String,
+    event: &lavalink_rs::model::events::TrackEnd,
+) -> lavalink_rs::model::BoxFuture<'static, ()> {
+    use crate::music_backend::LoopMode;
+    // lavalink-rs has its own GuildId type. Convert to serenity's so the
+    // DashMap key type matches what /loop and /previous use to read it.
+    let guild = serenity::GuildId::new(event.guild_id.0);
+    let lav_guild = event.guild_id;
+    let track = event.track.clone();
+    Box::pin(async move {
+        let Ok(state) = client.data::<LavalinkSharedState>() else {
+            return;
+        };
+        // Always record into history so /previous has something to pop. Cap
+        // at 50 entries per guild to bound memory.
+        state
+            .history
+            .entry(guild)
+            .or_default()
+            .push_back(track.clone());
+        if let Some(mut h) = state.history.get_mut(&guild)
+            && h.len() > 50
+        {
+            h.pop_front();
+        }
+        // Apply loop mode.
+        let mode = state
+            .loop_modes
+            .get(&guild)
+            .map(|r| *r)
+            .unwrap_or_default();
+        let Some(player) = client.get_player_context(lav_guild) else {
+            return;
+        };
+        match mode {
+            LoopMode::Off => {}
+            LoopMode::Track => {
+                if let Err(e) = player
+                    .get_queue()
+                    .push_to_front(lavalink_rs::player_context::TrackInQueue::from(track))
+                {
+                    warn!(
+                        target: "bot_template_rs::lavalink",
+                        error = %e,
+                        guild_id = %guild,
+                        "loop=track requeue failed"
+                    );
+                }
+            }
+            LoopMode::Queue => {
+                if let Err(e) = player
+                    .get_queue()
+                    .push_to_back(lavalink_rs::player_context::TrackInQueue::from(track))
+                {
+                    warn!(
+                        target: "bot_template_rs::lavalink",
+                        error = %e,
+                        guild_id = %guild,
+                        "loop=queue requeue failed"
+                    );
+                }
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +1102,74 @@ mod tests {
         let config = LavalinkConfig::default();
         assert_eq!(config.hostname, "localhost:2333");
         assert!(!config.is_ssl);
+    }
+
+    #[test]
+    fn filter_state_to_lavalink_neutral_emits_no_filters() {
+        let s = crate::music_backend::FilterState::neutral();
+        let f = filter_state_to_lavalink(&s);
+        assert!(f.equalizer.is_none());
+        assert!(f.timescale.is_none());
+    }
+
+    #[test]
+    fn filter_state_to_lavalink_bass_boost_sets_low_bands() {
+        let s = crate::music_backend::FilterState {
+            bass_boost: true,
+            ..crate::music_backend::FilterState::neutral()
+        };
+        let f = filter_state_to_lavalink(&s);
+        let eq = f.equalizer.expect("bass boost should produce an equalizer");
+        assert_eq!(eq.len(), 4, "boost touches the lowest 4 bands");
+        assert!(eq.iter().all(|b| b.gain > 0.0), "all bands gain > 0");
+        assert!(eq.iter().enumerate().all(|(i, b)| b.band == i as u8));
+    }
+
+    #[test]
+    fn filter_state_to_lavalink_speed_pitch_set_timescale() {
+        let s = crate::music_backend::FilterState {
+            speed: 1.2,
+            pitch: 0.8,
+            ..crate::music_backend::FilterState::neutral()
+        };
+        let f = filter_state_to_lavalink(&s);
+        let ts = f.timescale.expect("speed/pitch should produce a timescale");
+        assert!((ts.speed.unwrap() - 1.2).abs() < 0.001);
+        assert!((ts.pitch.unwrap() - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn filter_state_to_lavalink_neutral_speed_pitch_emits_no_timescale() {
+        // Setting speed=1.0 and pitch=1.0 explicitly should still produce no
+        // timescale filter (lavalink treats absent as 1.0; sending 1.0 is
+        // wasted bandwidth and makes the on-the-wire payload non-empty for
+        // no behavioral change).
+        let s = crate::music_backend::FilterState {
+            speed: 1.0,
+            pitch: 1.0,
+            ..crate::music_backend::FilterState::neutral()
+        };
+        let f = filter_state_to_lavalink(&s);
+        assert!(f.timescale.is_none());
+    }
+
+    #[test]
+    fn track_from_lavalink_pulls_known_fields() {
+        let mut td = lavalink_rs::model::track::TrackData::default();
+        td.info.title = "Title".into();
+        td.info.author = "Artist".into();
+        td.info.uri = Some("https://example/t".into());
+        td.info.length = 12345;
+        // user_data carries our requester id annotation when our own play()
+        // path enqueued it; track_from_lavalink should pick that up.
+        td.user_data = Some(serde_json::json!({"requester_id": 42u64}));
+
+        let t = track_from_lavalink(&td);
+        assert_eq!(t.title, "Title");
+        assert_eq!(t.author, "Artist");
+        assert_eq!(t.uri.as_deref(), Some("https://example/t"));
+        assert_eq!(t.duration_ms, Some(12345));
+        assert_eq!(t.requester, Some(42));
     }
 
     #[test]
