@@ -74,6 +74,14 @@ struct GuildMeta {
     /// across track changes — applied to the current TrackHandle on
     /// /volume and to each new track at enqueue time.
     volume: f32,
+    /// Per-guild loop mode. Track-loop is implemented via songbird's
+    /// `TrackHandle::enable_loop`; queue-loop on native would require
+    /// async re-resolution from inside the End handler so it's currently
+    /// gated to lavalink only (set_loop returns an error on native).
+    loop_mode: crate::music_backend::LoopMode,
+    /// Recently-finished tracks. AdvanceOnEnd pushes here on every track
+    /// end; `/previous` pops the most recent. Capped at 50 to bound growth.
+    history: std::collections::VecDeque<Track>,
 }
 
 impl Default for GuildMeta {
@@ -82,6 +90,8 @@ impl Default for GuildMeta {
             queue: std::collections::VecDeque::new(),
             now_playing: None,
             volume: 1.0,
+            loop_mode: crate::music_backend::LoopMode::Off,
+            history: std::collections::VecDeque::new(),
         }
     }
 }
@@ -99,6 +109,14 @@ impl EventHandler for AdvanceOnEnd {
     async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
         if let Some(arc) = self.meta.get(&self.guild) {
             let mut m = arc.value().lock().await;
+            // Capture the just-finished track into history so /previous
+            // has something to recall, then advance.
+            if let Some(finished) = m.now_playing.take() {
+                m.history.push_back(finished);
+                while m.history.len() > 50 {
+                    m.history.pop_front();
+                }
+            }
             m.now_playing = m.queue.pop_front();
         }
         None
@@ -583,6 +601,86 @@ impl MusicBackend for NativeBackend {
             }
         }
         Ok(())
+    }
+
+    async fn set_loop(
+        &self,
+        guild: GuildId,
+        mode: crate::music_backend::LoopMode,
+    ) -> Result<(), Error> {
+        use crate::music_backend::LoopMode;
+
+        // Queue-loop on native would need to re-enqueue the finished track
+        // via async yt-dlp resolution from inside songbird's End handler.
+        // Defer to a follow-up; for now refuse cleanly.
+        if matches!(mode, LoopMode::Queue) {
+            return Err(
+                "queue-loop is not yet supported on the native backend; track-loop is. Use the lavalink backend for queue-loop."
+                    .into(),
+            );
+        }
+
+        self.guild_meta(guild).lock().await.loop_mode = mode;
+
+        // Apply to the currently playing track via songbird's per-track loop.
+        if let Some(call) = self.songbird.get(guild) {
+            let handler = call.lock().await;
+            if let Some(current) = handler.queue().current() {
+                match mode {
+                    LoopMode::Track => {
+                        let _ = current.enable_loop();
+                    }
+                    LoopMode::Off | LoopMode::Queue => {
+                        let _ = current.disable_loop();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn get_loop(
+        &self,
+        guild: GuildId,
+    ) -> Result<crate::music_backend::LoopMode, Error> {
+        Ok(self.guild_meta(guild).lock().await.loop_mode)
+    }
+
+    async fn previous(&self, guild: GuildId) -> Result<Option<Track>, Error> {
+        let prev = self.guild_meta(guild).lock().await.history.pop_back();
+        let Some(prev) = prev else {
+            return Ok(None);
+        };
+        let url = match &prev.uri {
+            Some(u) if !u.is_empty() => u.clone(),
+            _ => {
+                // No URL means we can't re-resolve. Push it back onto history
+                // and report nothing playable.
+                self.guild_meta(guild)
+                    .lock()
+                    .await
+                    .history
+                    .push_back(prev);
+                return Ok(None);
+            }
+        };
+        // Re-enqueue at the front by re-using play_url — accepts any URL
+        // songbird's HttpRequest source can handle, including the yt-dlp
+        // direct-URL path most native tracks were resolved from.
+        let requester = prev.requester.map(UserId::new).unwrap_or(UserId::new(0));
+        let _ = self.play_url(guild, &url, requester).await?;
+        // play_url appends to the back. Move it to the front via the queue
+        // surgery primitives we already implemented.
+        let qlen = self.guild_meta(guild).lock().await.queue.len();
+        if qlen > 0 {
+            self.move_track(guild, qlen - 1, 0).await?;
+        }
+        // Skip current to start the previous track immediately.
+        if let Some(call) = self.songbird.get(guild) {
+            let handler = call.lock().await;
+            let _ = handler.queue().skip();
+        }
+        Ok(Some(prev))
     }
 
     async fn leave_cleanup(

@@ -425,6 +425,56 @@ pub async fn seek(
     Ok(())
 }
 
+/// Choice values for /loop matching the LoopMode enum.
+#[derive(Debug, poise::ChoiceParameter)]
+pub enum LoopChoice {
+    /// Repeat the currently playing track.
+    Track,
+    /// Repeat the queue: finished tracks are added to the back.
+    Queue,
+    /// Disable looping.
+    Off,
+}
+
+impl From<LoopChoice> for crate::music_backend::LoopMode {
+    fn from(c: LoopChoice) -> Self {
+        match c {
+            LoopChoice::Track => Self::Track,
+            LoopChoice::Queue => Self::Queue,
+            LoopChoice::Off => Self::Off,
+        }
+    }
+}
+
+/// Set the loop mode for the current guild.
+#[poise::command(slash_command, prefix_command, guild_only, rename = "loop")]
+pub async fn loop_mode(
+    ctx: Context<'_>,
+    #[description = "track | queue | off"] mode: LoopChoice,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let label = match mode {
+        LoopChoice::Track => "Looping current track",
+        LoopChoice::Queue => "Looping the queue",
+        LoopChoice::Off => "Loop disabled",
+    };
+    ctx.data().music.set_loop(guild_id, mode.into()).await?;
+    now_playing(&ctx, music_embed("Loop", label)).await?;
+    Ok(())
+}
+
+/// Replay the most recently finished track.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn previous(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let prev = ctx.data().music.previous(guild_id).await?;
+    match prev {
+        Some(t) => now_playing(&ctx, music_embed("Previous", track_line(&t))).await?,
+        None => status(&ctx, "No track in history yet.", true).await?,
+    }
+    Ok(())
+}
+
 /// Set the playback volume (0-200, default 100).
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn volume(

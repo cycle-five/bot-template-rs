@@ -51,6 +51,18 @@ pub enum BackendKind {
     Native,
 }
 
+/// Per-guild loop mode applied at track-end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoopMode {
+    /// No looping; queue advances normally.
+    #[default]
+    Off,
+    /// Re-queue the just-ended track at the front of the queue.
+    Track,
+    /// Push the just-ended track to the back of the queue.
+    Queue,
+}
+
 /// Trait every music backend implements.
 ///
 /// Lifecycle:
@@ -173,6 +185,18 @@ pub trait MusicBackend: Send + Sync + 'static {
     /// 1000, native (songbird) accepts arbitrary `f32` and we cap at 200
     /// to keep behavior uniform across the two.
     async fn set_volume(&self, guild: GuildId, percent: u16) -> Result<(), Error>;
+
+    /// Set the loop mode for the guild. `track` repeats the current track;
+    /// `queue` rotates finished tracks back to the end of the queue.
+    async fn set_loop(&self, guild: GuildId, mode: LoopMode) -> Result<(), Error>;
+
+    /// Get the current loop mode for the guild.
+    async fn get_loop(&self, guild: GuildId) -> Result<LoopMode, Error>;
+
+    /// Re-queue the most recently finished track at the front and start
+    /// playing it. Returns the track that will play, if any. Backends with
+    /// no history return `Ok(None)`.
+    async fn previous(&self, guild: GuildId) -> Result<Option<Track>, Error>;
 }
 
 #[cfg(test)]

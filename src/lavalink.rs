@@ -75,6 +75,24 @@ pub struct LavalinkBackend {
     songbird: Arc<songbird::Songbird>,
     #[cfg(feature = "music-core")]
     http: reqwest::Client,
+    /// Per-guild state the lavalink-side track-end handler reaches into via
+    /// `LavalinkClient::data::<LavalinkSharedState>()`. Lavalink's event
+    /// callbacks are `fn` pointers (not closures), so any state they need has
+    /// to come through that channel.
+    #[cfg(feature = "music-core")]
+    state: Arc<LavalinkSharedState>,
+}
+
+/// State shared between the bot's `LavalinkBackend` and the lavalink event
+/// callbacks. Stored on `LavalinkClient::user_data` and downcasted by the
+/// `track_end` handler.
+#[cfg(feature = "music-core")]
+#[derive(Default)]
+pub(crate) struct LavalinkSharedState {
+    pub loop_modes: dashmap::DashMap<serenity::GuildId, crate::music_backend::LoopMode>,
+    /// Bounded per-guild history of recently-finished tracks. `/previous`
+    /// pops the most recent entry. Capped at 50 to avoid unbounded growth.
+    pub history: dashmap::DashMap<serenity::GuildId, std::collections::VecDeque<lavalink_rs::model::track::TrackData>>,
 }
 
 impl LavalinkBackend {
@@ -86,6 +104,8 @@ impl LavalinkBackend {
             songbird,
             #[cfg(feature = "music-core")]
             http: reqwest::Client::new(),
+            #[cfg(feature = "music-core")]
+            state: Arc::new(LavalinkSharedState::default()),
         }
     }
 
@@ -128,19 +148,24 @@ impl LavalinkBackend {
             "Connecting to Lavalink node"
         );
 
+        let evs = events::Events {
+            track_end: Some(track_end_handler),
+            ..Default::default()
+        };
         let node = NodeBuilder {
             hostname: config.hostname.clone(),
             is_ssl: config.is_ssl,
-            events: events::Events::default(),
+            events: evs.clone(),
             password: config.password.clone(),
             user_id: user_id.get().into(),
             session_id: None,
         };
 
-        let client = LavalinkClient::new(
-            events::Events::default(),
+        let client = LavalinkClient::new_with_data(
+            evs,
             vec![node],
             NodeDistributionStrategy::round_robin(),
+            self.state.clone(),
         )
         .await;
 
@@ -731,6 +756,112 @@ impl MusicBackend for LavalinkBackend {
         player.set_volume(v).await?;
         Ok(())
     }
+
+    async fn set_loop(
+        &self,
+        guild: serenity::GuildId,
+        mode: crate::music_backend::LoopMode,
+    ) -> Result<(), Error> {
+        if matches!(mode, crate::music_backend::LoopMode::Off) {
+            self.state.loop_modes.remove(&guild);
+        } else {
+            self.state.loop_modes.insert(guild, mode);
+        }
+        Ok(())
+    }
+
+    async fn get_loop(
+        &self,
+        guild: serenity::GuildId,
+    ) -> Result<crate::music_backend::LoopMode, Error> {
+        Ok(self
+            .state
+            .loop_modes
+            .get(&guild)
+            .map(|r| *r)
+            .unwrap_or_default())
+    }
+
+    async fn previous(
+        &self,
+        guild: serenity::GuildId,
+    ) -> Result<Option<Track>, Error> {
+        let Some(mut entry) = self.state.history.get_mut(&guild) else {
+            return Ok(None);
+        };
+        let Some(prev) = entry.pop_back() else {
+            return Ok(None);
+        };
+        let display = track_from_lavalink(&prev);
+        drop(entry);
+        let player = self.player(guild).await?;
+        player
+            .get_queue()
+            .push_to_front(TrackInQueue::from(prev))?;
+        // If something's playing, skip to the previous; if idle, kick playback.
+        if player.get_player().await?.track.is_some() {
+            player.skip()?;
+        } else {
+            player.skip()?;
+        }
+        Ok(Some(display))
+    }
+}
+
+/// Lavalink-side track-end callback. Reaches into `LavalinkSharedState`
+/// (stored on the client's `user_data`) for per-guild loop and history
+/// state. Lavalink event hooks are `fn` pointers, not closures, so we
+/// can't capture the backend Arc directly.
+fn track_end_handler(
+    client: lavalink_rs::client::LavalinkClient,
+    _session_id: String,
+    event: &lavalink_rs::model::events::TrackEnd,
+) -> lavalink_rs::model::BoxFuture<'static, ()> {
+    use crate::music_backend::LoopMode;
+    // lavalink-rs has its own GuildId type. Convert to serenity's so the
+    // DashMap key type matches what /loop and /previous use to read it.
+    let guild = serenity::GuildId::new(event.guild_id.0);
+    let lav_guild = event.guild_id;
+    let track = event.track.clone();
+    Box::pin(async move {
+        let Ok(state) = client.data::<LavalinkSharedState>() else {
+            return;
+        };
+        // Always record into history so /previous has something to pop. Cap
+        // at 50 entries per guild to bound memory.
+        state
+            .history
+            .entry(guild)
+            .or_default()
+            .push_back(track.clone());
+        if let Some(mut h) = state.history.get_mut(&guild)
+            && h.len() > 50
+        {
+            h.pop_front();
+        }
+        // Apply loop mode.
+        let mode = state
+            .loop_modes
+            .get(&guild)
+            .map(|r| *r)
+            .unwrap_or_default();
+        let Some(player) = client.get_player_context(lav_guild) else {
+            return;
+        };
+        match mode {
+            LoopMode::Off => {}
+            LoopMode::Track => {
+                let _ = player
+                    .get_queue()
+                    .push_to_front(lavalink_rs::player_context::TrackInQueue::from(track));
+            }
+            LoopMode::Queue => {
+                let _ = player
+                    .get_queue()
+                    .push_to_back(lavalink_rs::player_context::TrackInQueue::from(track));
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
