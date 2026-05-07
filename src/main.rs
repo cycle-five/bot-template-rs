@@ -87,6 +87,7 @@ fn framework_options(prefix: String) -> poise::FrameworkOptions<Data, Error> {
                 music::volume(),
                 music::loop_mode(),
                 music::previous(),
+                music::lyrics(),
             ]);
             #[cfg(feature = "playlists")]
             v.push(playlist::playlist());

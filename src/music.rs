@@ -463,6 +463,129 @@ pub async fn loop_mode(
     Ok(())
 }
 
+/// Strip noise commonly appended to track titles ("Official Video", etc.)
+/// and timestamp tags so search hits land on the underlying song.
+fn clean_track_title(title: &str) -> String {
+    let mut t = title.to_string();
+    // Drop parenthetical/bracketed noise like "(Official Music Video)".
+    let noise = [
+        "official music video",
+        "official video",
+        "music video",
+        "official audio",
+        "lyric video",
+        "lyrics video",
+        "audio",
+        "hd",
+        "remastered",
+        "remaster",
+        "explicit",
+    ];
+    for delim in [('(', ')'), ('[', ']')] {
+        loop {
+            let Some(start) = t.find(delim.0) else { break };
+            let Some(end_rel) = t[start..].find(delim.1) else { break };
+            let end = start + end_rel + 1;
+            let inner = t[start + 1..end - 1].to_lowercase();
+            if noise.iter().any(|n| inner.contains(n)) {
+                t.replace_range(start..end, "");
+            } else {
+                break;
+            }
+        }
+    }
+    t.trim().to_string()
+}
+
+/// Strip leading timestamps like `[00:28.57]` from a lyrics string. lrclib
+/// returns plainLyrics with these annotations sometimes when no truly
+/// timestamp-free version is available.
+fn strip_timestamps(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        let line = line.trim_start();
+        // `[mm:ss.xx]` prefix.
+        let stripped = if let Some(rest) = line.strip_prefix('[') {
+            if let Some(end_rel) = rest.find(']') {
+                rest[end_rel + 1..].trim_start()
+            } else {
+                line
+            }
+        } else {
+            line
+        };
+        out.push_str(stripped);
+        out.push('\n');
+    }
+    out
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LrcLibResponse {
+    #[serde(rename = "plainLyrics")]
+    plain_lyrics: Option<String>,
+    instrumental: Option<bool>,
+}
+
+/// Fetch lyrics for the currently playing track via lrclib.net.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn lyrics(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let Some(np) = ctx.data().music.now_playing(guild_id).await? else {
+        status(&ctx, "Nothing is playing.", true).await?;
+        return Ok(());
+    };
+    ctx.defer().await?;
+
+    let title = clean_track_title(&np.title);
+    let artist = np.author.clone();
+    let url = "https://lrclib.net/api/get";
+    let resp = reqwest::Client::new()
+        .get(url)
+        .query(&[("track_name", title.as_str()), ("artist_name", artist.as_str())])
+        .send()
+        .await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        status(&ctx, &format!("No lyrics found for `{artist} — {title}`."), true).await?;
+        return Ok(());
+    }
+    if !resp.status().is_success() {
+        status(
+            &ctx,
+            &format!("lrclib returned {} — try again later.", resp.status()),
+            true,
+        )
+        .await?;
+        return Ok(());
+    }
+    let body: LrcLibResponse = resp.json().await?;
+    if body.instrumental.unwrap_or(false) {
+        status(&ctx, &format!("`{title}` is marked instrumental."), true).await?;
+        return Ok(());
+    }
+    let Some(plain) = body.plain_lyrics else {
+        status(
+            &ctx,
+            &format!("`{artist} — {title}` has no plain lyrics on lrclib."),
+            true,
+        )
+        .await?;
+        return Ok(());
+    };
+    let cleaned = strip_timestamps(&plain);
+    // Discord embed description caps at 4096; leave room for ellipsis.
+    let trimmed: String = if cleaned.chars().count() > 3900 {
+        let mut s: String = cleaned.chars().take(3900).collect();
+        s.push_str("\n…(truncated)");
+        s
+    } else {
+        cleaned
+    };
+    let title_text = format!("{artist} — {title}");
+    now_playing(&ctx, music_embed(title_text, trimmed)).await?;
+    Ok(())
+}
+
 /// Replay the most recently finished track.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn previous(ctx: Context<'_>) -> Result<(), Error> {
@@ -703,6 +826,31 @@ mod tests {
 
         assert!(play().guild_only);
         assert!(skip().guild_only);
+    }
+
+    #[test]
+    fn clean_track_title_strips_youtube_noise() {
+        assert_eq!(
+            clean_track_title("The Less I Know The Better (Official Music Video)"),
+            "The Less I Know The Better"
+        );
+        assert_eq!(
+            clean_track_title("Song Name [Official Audio]"),
+            "Song Name"
+        );
+        // Doesn't strip non-noise parens.
+        assert_eq!(clean_track_title("Song (feat. Artist)"), "Song (feat. Artist)");
+        // Multiple noise tags, stacked.
+        assert_eq!(
+            clean_track_title("Song (Official Video) [HD]"),
+            "Song"
+        );
+    }
+
+    #[test]
+    fn strip_timestamps_drops_lrc_prefixes() {
+        let input = "[00:24.59] Hello\n[00:28.57] World\nNo timestamp here\n";
+        assert_eq!(strip_timestamps(input), "Hello\nWorld\nNo timestamp here\n");
     }
 
     #[test]
