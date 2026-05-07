@@ -271,12 +271,17 @@ impl MusicBackend for NativeBackend {
 
     async fn stop(&self, guild: GuildId) -> Result<Option<Track>, Error> {
         let call = self.songbird.get(guild).ok_or("not in voice")?;
-        
 
+        // Native diverges from lavalink here: songbird's `TrackQueue` auto-
+        // advances on track end via its built-in `QueueHandler`, so we
+        // can't cleanly stop just the current track without the next one
+        // jumping in. Drain everything instead — `/stop` ends the session
+        // entirely on this backend. Users wanting just "drain the queue,
+        // keep the current track" should call `/clear`. Matching lavalink
+        // semantics exactly would require either a deeper integration with
+        // songbird's `Driver` or a parallel-queue-with-replay design.
         let meta_arc = self.guild_meta(guild);
         let stopped = {
-            // Clear queued metadata up-front so AdvanceOnEnd sees an empty
-            // queue and sets now_playing to None rather than advancing.
             let mut meta = meta_arc.lock().await;
             let was_playing = meta.now_playing.clone();
             meta.queue.clear();
@@ -286,6 +291,31 @@ impl MusicBackend for NativeBackend {
         let handler = call.lock().await;
         handler.queue().stop();
         Ok(stopped)
+    }
+
+    async fn clear(&self, guild: GuildId) -> Result<(), Error> {
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+
+        // Drop our parallel metadata for upcoming tracks first so a
+        // racing AdvanceOnEnd doesn't promote one of them into
+        // `now_playing` after we've drained songbird's queue.
+        self.guild_meta(guild).lock().await.queue.clear();
+
+        // Pull every queued track *behind* the current one out of
+        // songbird's internal queue and stop each so its driver-side
+        // resources are released (per modify_queue's safety note).
+        let handler = call.lock().await;
+        let drained: Vec<_> = handler.queue().modify_queue(|q| {
+            if q.len() <= 1 {
+                Vec::new()
+            } else {
+                q.drain(1..).collect()
+            }
+        });
+        for queued in &drained {
+            let _ = queued.handle().stop();
+        }
+        Ok(())
     }
 
     async fn pause(&self, guild: GuildId) -> Result<(), Error> {

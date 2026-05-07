@@ -72,6 +72,7 @@ fn framework_options(prefix: String) -> poise::FrameworkOptions<Data, Error> {
                 music::play(),
                 music::play_file(),
                 music::stop(),
+                music::clear(),
                 music::pause(),
                 music::resume(),
                 music::skip(),

@@ -220,7 +220,7 @@ pub async fn play(
     Ok(())
 }
 
-/// Stop playback and clear the current track.
+/// Stop the currently playing track. Use /clear to also drain the queue.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("guild only")?;
@@ -229,6 +229,21 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         Some(t) => now_playing(&ctx, music_embed("Stopped", t.title)).await?,
         None => status(&ctx, "Nothing to stop.", true).await?,
     }
+    Ok(())
+}
+
+/// Drain the upcoming queue. Does not stop the currently playing track.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let cleared = ctx.data().music.queue_snapshot(guild_id).await?.len();
+    ctx.data().music.clear(guild_id).await?;
+    let body = if cleared == 0 {
+        "Queue was already empty.".to_string()
+    } else {
+        format!("Cleared {cleared} track(s) from the queue.")
+    };
+    now_playing(&ctx, music_embed("Cleared", body)).await?;
     Ok(())
 }
 

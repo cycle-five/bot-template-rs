@@ -108,8 +108,16 @@ pub trait MusicBackend: Send + Sync + 'static {
     /// Skip the current track. Returns the skipped track, if any.
     async fn skip(&self, guild: GuildId) -> Result<Option<Track>, Error>;
 
-    /// Stop the current track and clear it. Returns the stopped track.
+    /// Stop the currently playing track. Returns the stopped track, if any.
+    /// The queue (upcoming tracks) is **not** drained — callers wanting that
+    /// should call [`clear`] separately.
+    ///
+    /// [`clear`]: Self::clear
     async fn stop(&self, guild: GuildId) -> Result<Option<Track>, Error>;
+
+    /// Drain the queue of upcoming tracks. Does **not** stop the currently
+    /// playing track.
+    async fn clear(&self, guild: GuildId) -> Result<(), Error>;
 
     async fn pause(&self, guild: GuildId) -> Result<(), Error>;
     async fn resume(&self, guild: GuildId) -> Result<(), Error>;

@@ -555,6 +555,12 @@ impl MusicBackend for LavalinkBackend {
         }
     }
 
+    async fn clear(&self, guild: serenity::GuildId) -> Result<(), Error> {
+        let player = self.player(guild).await?;
+        player.get_queue().clear()?;
+        Ok(())
+    }
+
     async fn pause(&self, guild: serenity::GuildId) -> Result<(), Error> {
         self.player(guild).await?.set_pause(true).await?;
         Ok(())
