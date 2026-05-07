@@ -1,5 +1,6 @@
 use crate::{COMMAND_TARGET, CONSOLE_TARGET, ERROR_TARGET, EVENT_TARGET};
 use crate::{Data, Error};
+use poise::serenity_prelude as serenity;
 use poise::{Context, FrameworkError};
 use std::path::Path;
 use std::time::Instant;
@@ -139,8 +140,13 @@ pub fn log_command_end(ctx: Context<'_, Data, Error>) {
     );
 }
 
-/// Log errors that occur during command execution
-pub fn log_command_error(error: &FrameworkError<'_, Data, Error>) {
+/// Log errors that occur during command execution.
+///
+/// Async because `UnknownInteraction` triggers an ephemeral reply so users
+/// see something useful instead of "The application did not respond" when
+/// they invoke a command Discord still has registered but the bot no longer
+/// exposes (typically a stale slash command from an older bot version).
+pub async fn log_command_error(error: &FrameworkError<'_, Data, Error>) {
     match error {
         FrameworkError::Command { error, ctx, .. } => {
             let command_name = ctx.command().qualified_name.clone();
@@ -179,6 +185,41 @@ pub fn log_command_error(error: &FrameworkError<'_, Data, Error>) {
                 error = %error_msg,
                 "Command check failed"
             );
+        }
+        FrameworkError::UnknownInteraction { interaction, framework, .. } => {
+            let command_name = interaction.data.name.clone();
+            let guild_id = interaction
+                .guild_id
+                .map_or_else(|| "DM".to_string(), |id| id.get().to_string());
+            let user_id = interaction.user.id.get().to_string();
+
+            error!(
+                target: ERROR_TARGET,
+                command = %command_name,
+                guild_id = %guild_id,
+                user_id = %user_id,
+                "Unknown interaction (likely a stale slash command registration)"
+            );
+
+            let response = serenity::CreateInteractionResponse::Message(
+                serenity::CreateInteractionResponseMessage::new()
+                    .ephemeral(true)
+                    .content(format!(
+                        "`/{command_name}` is no longer a registered command on this bot. \
+                         An admin can run `/register` to refresh the command list."
+                    )),
+            );
+            if let Err(err) = interaction
+                .create_response(&framework.serenity_context.http, response)
+                .await
+            {
+                error!(
+                    target: ERROR_TARGET,
+                    command = %command_name,
+                    error = %err,
+                    "Failed to send ephemeral UnknownInteraction response"
+                );
+            }
         }
         err => {
             error!(

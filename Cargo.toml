@@ -27,6 +27,11 @@ reqwest = { version = "0.13", default-features = false, features = [
   "multipart",
   "query",
 ], optional = true }
+# Direct dep so we can install a process-level CryptoProvider at startup.
+# Multiple transitive deps pull in both `aws-lc-rs` and `ring` providers,
+# leaving rustls unable to auto-pick one. We pick `aws-lc-rs` explicitly
+# (matches reqwest's `__rustls-aws-lc-rs` selection).
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 # Declared directly so we can enable the container/codec features songbird's
 # native driver needs to probe yt-dlp's output (WebM/MKV, Ogg, etc.). Cargo
 # feature unification forwards these into songbird's own use of symphonia.

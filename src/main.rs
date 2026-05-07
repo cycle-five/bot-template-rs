@@ -104,7 +104,7 @@ fn framework_options(prefix: String) -> poise::FrameworkOptions<Data, Error> {
         },
         on_error: |error| {
             Box::pin(async move {
-                crate::logging::log_command_error(&error);
+                crate::logging::log_command_error(&error).await;
             })
         },
         prefix_options: poise::PrefixFrameworkOptions {
@@ -120,6 +120,13 @@ async fn async_main() -> Result<(), Error> {
     // Load variables from a local .env file (if present) before anything else
     // reads from the environment.
     let _ = dotenvy::dotenv();
+
+    // Pick a rustls CryptoProvider before any TLS code runs. Both `aws-lc-rs`
+    // and `ring` end up in the tree (reqwest selects aws-lc-rs; some other
+    // transitive enables ring), so rustls 0.23 refuses to auto-install.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls aws-lc-rs CryptoProvider");
 
     // Initialize logging
     logging::init()?;
