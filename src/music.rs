@@ -463,6 +463,78 @@ pub async fn loop_mode(
     Ok(())
 }
 
+/// Toggle bass boost (lavalink-only). Stacks with /speed and /pitch.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn bassboost(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let mut state = ctx.data().music.get_filters(guild_id).await?;
+    state.bass_boost = !state.bass_boost;
+    let label = if state.bass_boost { "on" } else { "off" };
+    ctx.data().music.set_filters(guild_id, state).await?;
+    now_playing(&ctx, music_embed("Bass boost", format!("Turned {label}."))).await?;
+    Ok(())
+}
+
+/// Toggle nightcore (speed + pitch up; lavalink-only).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn nightcore(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let mut state = ctx.data().music.get_filters(guild_id).await?;
+    let nightcore_active = (state.speed - 1.2).abs() < 0.001 && (state.pitch - 1.2).abs() < 0.001;
+    if nightcore_active {
+        state.speed = 1.0;
+        state.pitch = 1.0;
+        ctx.data().music.set_filters(guild_id, state).await?;
+        now_playing(&ctx, music_embed("Nightcore", "Turned off.")).await?;
+    } else {
+        state.speed = 1.2;
+        state.pitch = 1.2;
+        ctx.data().music.set_filters(guild_id, state).await?;
+        now_playing(&ctx, music_embed("Nightcore", "Turned on.")).await?;
+    }
+    Ok(())
+}
+
+/// Set playback speed (0.5–2.0; lavalink-only).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn speed(
+    ctx: Context<'_>,
+    #[description = "0.5-2.0; 1.0 is default"] multiplier: f32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let m = multiplier.clamp(0.5, 2.0);
+    let mut state = ctx.data().music.get_filters(guild_id).await?;
+    state.speed = m;
+    ctx.data().music.set_filters(guild_id, state).await?;
+    now_playing(&ctx, music_embed("Speed", format!("Set to {m:.2}x."))).await?;
+    Ok(())
+}
+
+/// Set pitch (0.5–2.0; lavalink-only).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn pitch(
+    ctx: Context<'_>,
+    #[description = "0.5-2.0; 1.0 is default"] multiplier: f32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let m = multiplier.clamp(0.5, 2.0);
+    let mut state = ctx.data().music.get_filters(guild_id).await?;
+    state.pitch = m;
+    ctx.data().music.set_filters(guild_id, state).await?;
+    now_playing(&ctx, music_embed("Pitch", format!("Set to {m:.2}x."))).await?;
+    Ok(())
+}
+
+/// Reset all audio filters (lavalink-only).
+#[poise::command(slash_command, prefix_command, guild_only, rename = "filteroff")]
+pub async fn filter_off(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let neutral = crate::music_backend::FilterState::neutral();
+    ctx.data().music.set_filters(guild_id, neutral).await?;
+    now_playing(&ctx, music_embed("Filters", "Cleared.")).await?;
+    Ok(())
+}
+
 /// Strip noise commonly appended to track titles ("Official Video", etc.)
 /// and timestamp tags so search hits land on the underlying song.
 fn clean_track_title(title: &str) -> String {

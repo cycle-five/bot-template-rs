@@ -63,6 +63,35 @@ pub enum LoopMode {
     Queue,
 }
 
+/// Per-guild audio filter state. Backends translate this to whatever their
+/// native filter representation is — lavalink uses its `Filters` struct;
+/// native (songbird) would need a DSP layer we don't yet have, so the
+/// native backend's `set_filters` returns an error.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FilterState {
+    pub bass_boost: bool,
+    /// Playback speed multiplier (1.0 = default).
+    pub speed: f32,
+    /// Pitch multiplier (1.0 = default).
+    pub pitch: f32,
+}
+
+impl FilterState {
+    /// Default: no filters, speed and pitch at 1.0.
+    pub fn neutral() -> Self {
+        Self {
+            bass_boost: false,
+            speed: 1.0,
+            pitch: 1.0,
+        }
+    }
+
+    pub fn is_neutral(&self) -> bool {
+        !self.bass_boost && (self.speed - 1.0).abs() < f32::EPSILON
+            && (self.pitch - 1.0).abs() < f32::EPSILON
+    }
+}
+
 /// Trait every music backend implements.
 ///
 /// Lifecycle:
@@ -197,6 +226,13 @@ pub trait MusicBackend: Send + Sync + 'static {
     /// playing it. Returns the track that will play, if any. Backends with
     /// no history return `Ok(None)`.
     async fn previous(&self, guild: GuildId) -> Result<Option<Track>, Error>;
+
+    /// Set the per-guild audio filter state. Lavalink translates to its
+    /// `Filters` struct; native returns an error (no DSP layer yet).
+    async fn set_filters(&self, guild: GuildId, state: FilterState) -> Result<(), Error>;
+
+    /// Get the current per-guild filter state.
+    async fn get_filters(&self, guild: GuildId) -> Result<FilterState, Error>;
 }
 
 #[cfg(test)]

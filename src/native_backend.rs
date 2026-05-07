@@ -646,6 +646,25 @@ impl MusicBackend for NativeBackend {
         Ok(self.guild_meta(guild).lock().await.loop_mode)
     }
 
+    async fn set_filters(
+        &self,
+        _guild: GuildId,
+        _state: crate::music_backend::FilterState,
+    ) -> Result<(), Error> {
+        // songbird has no built-in filter chain (EQ, time-stretch, pitch
+        // shift). Implementing this would mean splicing a DSP layer into
+        // the input pipeline. Lavalink does it natively — switch backends
+        // with `MUSIC_BACKEND=lavalink` if you need filters.
+        Err("audio filters are not supported on the native backend; switch to lavalink".into())
+    }
+
+    async fn get_filters(
+        &self,
+        _guild: GuildId,
+    ) -> Result<crate::music_backend::FilterState, Error> {
+        Ok(crate::music_backend::FilterState::neutral())
+    }
+
     async fn previous(&self, guild: GuildId) -> Result<Option<Track>, Error> {
         let prev = self.guild_meta(guild).lock().await.history.pop_back();
         let Some(prev) = prev else {

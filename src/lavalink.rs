@@ -93,6 +93,9 @@ pub(crate) struct LavalinkSharedState {
     /// Bounded per-guild history of recently-finished tracks. `/previous`
     /// pops the most recent entry. Capped at 50 to avoid unbounded growth.
     pub history: dashmap::DashMap<serenity::GuildId, std::collections::VecDeque<lavalink_rs::model::track::TrackData>>,
+    /// Active filter state per guild. Read by `/filter set`/`/bassboost`/etc.
+    /// to merge incrementally; resets to `FilterState::neutral()` lazily.
+    pub filters: dashmap::DashMap<serenity::GuildId, crate::music_backend::FilterState>,
 }
 
 impl LavalinkBackend {
@@ -782,6 +785,34 @@ impl MusicBackend for LavalinkBackend {
             .unwrap_or_default())
     }
 
+    async fn set_filters(
+        &self,
+        guild: serenity::GuildId,
+        state: crate::music_backend::FilterState,
+    ) -> Result<(), Error> {
+        let player = self.player(guild).await?;
+        let lav_filters = filter_state_to_lavalink(&state);
+        player.set_filters(lav_filters).await?;
+        if state.is_neutral() {
+            self.state.filters.remove(&guild);
+        } else {
+            self.state.filters.insert(guild, state);
+        }
+        Ok(())
+    }
+
+    async fn get_filters(
+        &self,
+        guild: serenity::GuildId,
+    ) -> Result<crate::music_backend::FilterState, Error> {
+        Ok(self
+            .state
+            .filters
+            .get(&guild)
+            .map(|r| *r)
+            .unwrap_or_else(crate::music_backend::FilterState::neutral))
+    }
+
     async fn previous(
         &self,
         guild: serenity::GuildId,
@@ -806,6 +837,38 @@ impl MusicBackend for LavalinkBackend {
         }
         Ok(Some(display))
     }
+}
+
+/// Translate our backend-agnostic `FilterState` into lavalink's `Filters`
+/// struct. Bass boost is implemented as gains on the lowest 4 EQ bands
+/// (each band covers ~25 Hz / ~31 Hz / ~40 Hz / ~50 Hz). Speed and pitch
+/// map directly to `Timescale.speed` / `Timescale.pitch`.
+#[cfg(feature = "music-core")]
+fn filter_state_to_lavalink(
+    s: &crate::music_backend::FilterState,
+) -> lavalink_rs::model::player::Filters {
+    use lavalink_rs::model::player::{Equalizer, Filters, Timescale};
+    let mut f = Filters::default();
+    if s.bass_boost {
+        f.equalizer = Some(
+            (0..4)
+                .map(|band| Equalizer {
+                    band,
+                    gain: 0.25, // moderate boost; max gain is 1.0
+                })
+                .collect(),
+        );
+    }
+    let speed = s.speed.max(0.1);
+    let pitch = s.pitch.max(0.1);
+    if (speed - 1.0).abs() > f32::EPSILON || (pitch - 1.0).abs() > f32::EPSILON {
+        f.timescale = Some(Timescale {
+            speed: Some(speed.into()),
+            pitch: Some(pitch.into()),
+            rate: None,
+        });
+    }
+    f
 }
 
 /// Lavalink-side track-end callback. Reaches into `LavalinkSharedState`
