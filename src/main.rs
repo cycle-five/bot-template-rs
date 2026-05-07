@@ -1,18 +1,51 @@
+#[cfg(feature = "tts")]
+mod audio_http;
 mod commands;
 mod data;
 mod handlers;
+#[cfg(feature = "lavalink")]
 mod lavalink;
 mod logging;
+// `music` (the user-facing command surface) needs both the backend trait
+// and an actual backend impl. `music-core` alone (e.g. from `playlists`)
+// pulls in only the trait + Track type for serialization. `tts` pulls
+// `native` (songbird's driver for playback) without the command surface,
+// so we require music-core explicitly.
+#[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
 mod music;
+#[cfg(feature = "music-core")]
+mod music_backend;
+// Native MusicBackend impl — only meaningful when we have the trait.
+// `native` alone (e.g. from `tts`) pulls the songbird driver for playback
+// without the music-command layer, so this module stays gated.
+#[cfg(all(feature = "native", feature = "music-core"))]
+mod native_backend;
+// `playlists` adds /playlist save/load/list/feature commands that drive a
+// music backend, so it requires either lavalink or native to be useful.
+#[cfg(all(feature = "playlists", not(any(feature = "lavalink", feature = "native"))))]
+compile_error!(
+    "the `playlists` feature needs a music backend; enable `lavalink` or `native` \
+     (or the `music` / `music-native` bundles)"
+);
+#[cfg(feature = "playlists")]
+mod playlist;
+#[cfg(feature = "radio")]
+mod radio;
+#[cfg(feature = "record")]
+mod record;
 mod reply;
 mod status;
+#[cfg(feature = "stt")]
+mod stt;
+#[cfg(feature = "tts")]
+mod tts;
 
 use std::env;
+use std::sync::Arc;
 
 use poise::serenity_prelude::{self as serenity};
 use serenity::GatewayIntents;
-use songbird::SerenityInit;
-use tracing::{info, warn};
+use tracing::{error, info};
 
 // Customize these constants for your bot
 pub const BOT_NAME: &str = "bot_template_rs";
@@ -24,6 +57,64 @@ pub use data::Data;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
+/// Build poise FrameworkOptions with our commands and lifecycle hooks.
+fn framework_options(prefix: String) -> poise::FrameworkOptions<Data, Error> {
+    poise::FrameworkOptions {
+        commands: {
+            #[allow(unused_mut)]
+            let mut v = vec![commands::ping(), commands::register(), status::status()];
+            #[cfg(feature = "lavalink")]
+            v.push(lavalink::lavalink());
+            #[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
+            v.extend([
+                music::join(),
+                music::leave(),
+                music::play(),
+                music::play_file(),
+                music::stop(),
+                music::pause(),
+                music::resume(),
+                music::skip(),
+                music::queue(),
+            ]);
+            #[cfg(feature = "playlists")]
+            v.push(playlist::playlist());
+            #[cfg(feature = "record")]
+            v.push(record::record());
+            #[cfg(feature = "tts")]
+            v.push(tts::tts());
+            #[cfg(feature = "stt")]
+            {
+                v.push(stt::stt());
+                v.push(stt::transcribe_message());
+            }
+            #[cfg(feature = "radio")]
+            v.push(radio::radio());
+            v
+        },
+        pre_command: |ctx| {
+            Box::pin(async move {
+                logging::log_command_start(ctx);
+            })
+        },
+        post_command: |ctx| {
+            Box::pin(async move {
+                logging::log_command_end(ctx);
+            })
+        },
+        on_error: |error| {
+            Box::pin(async move {
+                crate::logging::log_command_error(&error);
+            })
+        },
+        prefix_options: poise::PrefixFrameworkOptions {
+            prefix: Some(prefix.into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 /// Main function to run the bot
 async fn async_main() -> Result<(), Error> {
     // Load variables from a local .env file (if present) before anything else
@@ -34,87 +125,74 @@ async fn async_main() -> Result<(), Error> {
     logging::init()?;
 
     // Load environment variables
-    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");
+    let token = serenity::Token::from_env("DISCORD_TOKEN")
+        .expect("DISCORD_TOKEN must be set");
     let prefix = env::var("PREFIX").unwrap_or_else(|_| "!".to_string());
+
+    // Build the Songbird voice manager up-front so we can stash an Arc both
+    // in serenity (so it dispatches voice gateway events to it) and in our
+    // own Data (so backends drive playback without going through ctx).
+    //
+    // Radio needs decoded PCM from VoiceTick (default mode only decrypts).
+    // Record is fine with either — it takes the raw Opus payload straight
+    // off the packet. So: enable full decode when radio is compiled in,
+    // otherwise use songbird's defaults.
+    #[cfg(feature = "voice")]
+    let songbird = {
+        #[cfg(feature = "radio")]
+        let sb_config = songbird::Config::default().decode_mode(
+            songbird::driver::DecodeMode::Decode(songbird::driver::DecodeConfig::default()),
+        );
+        #[cfg(not(feature = "radio"))]
+        let sb_config = songbird::Config::default();
+        songbird::Songbird::serenity_from_config(sb_config)
+    };
 
     // Load the bot's data from file
     info!("Loading bot data...");
+    #[cfg(feature = "voice")]
+    let data = Data::load(songbird.clone()).await;
+    #[cfg(not(feature = "voice"))]
     let data = Data::load().await;
     let data_clone = data.clone();
 
-    // Configure the Poise framework
-    let framework = poise::Framework::builder()
-        .options(poise::FrameworkOptions {
-            commands: vec![
-                commands::ping(),
-                status::status(),
-                lavalink::lavalink(),
-                music::join(),
-                music::leave(),
-                music::play(),
-                music::stop(),
-                music::pause(),
-                music::resume(),
-                music::skip(),
-                music::queue(),
-            ],
-            pre_command: |ctx| {
-                Box::pin(async move {
-                    // Log the start of command execution
-                    logging::log_command_start(ctx);
-                })
-            },
-            post_command: |ctx| {
-                Box::pin(async move {
-                    // Log the end of command execution
-                    logging::log_command_end(ctx);
-                })
-            },
-            on_error: |error| {
-                Box::pin(async move {
-                    // Log the error using our logging system
-                    crate::logging::log_command_error(&error);
-                })
-            },
-            prefix_options: poise::PrefixFrameworkOptions {
-                prefix: Some(prefix),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .setup(move |ctx, ready, framework| {
-            let data = data.clone();
-            Box::pin(async move {
-                logging::log_console(
-                    "Registering commands and return data, this will go away in the next version of poise"
-                );
-                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-
-                // Try to bring up Lavalink on startup. Failure is non-fatal -
-                // admins can always reconnect via `/lavalink connect` later.
-                if let Err(e) = lavalink::connect(&data, ready.user.id).await {
-                    warn!(
-                        target: "bot_template_rs::lavalink",
-                        error = %e,
-                        "Lavalink connection failed at startup; use /lavalink connect to retry"
-                    );
-                }
-
-                Ok(data)
-            })
-        })
-        .build();
-
     // Configure the Serenity client
-    let intents = GatewayIntents::non_privileged()
-        | GatewayIntents::MESSAGE_CONTENT
-        | GatewayIntents::GUILD_VOICE_STATES;
-    let mut client = serenity::ClientBuilder::new(token, intents)
-        .event_handler(handlers::Handler)
-        .framework(framework)
-        .register_songbird()
+    let intents = GatewayIntents::non_privileged();
+    // Any voice-touching feature needs voice-state events, not just music.
+    // record/radio/tts on the native side all need to know when users join
+    // and leave the bot's channel.
+    #[cfg(feature = "voice")]
+    let intents = intents | GatewayIntents::GUILD_VOICE_STATES;
+
+    let framework = poise::Framework::new(framework_options(prefix));
+
+    let client_builder = serenity::ClientBuilder::new(token, intents)
+        .event_handler(Arc::new(handlers::Handler))
+        .framework(Box::new(framework))
+        .data(Arc::new(data) as _);
+    #[cfg(feature = "voice")]
+    let client_builder = client_builder.voice_manager(songbird);
+    let mut client = client_builder
         .await
         .expect("Failed to create client");
+
+    // Spawn the audio HTTP layer if BOT_PUBLIC_URL is set. Without a public
+    // URL there's nothing for remote pullers (e.g. lavalink) to reach, so
+    // the server would just burn a port for no reason.
+    #[cfg(feature = "tts")]
+    if data_clone.audio_store.public_url().is_some() {
+        let bind = env::var("BOT_HTTP_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let store = data_clone.audio_store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = audio_http::serve(&bind, store).await {
+                error!(
+                    target: ERROR_TARGET,
+                    error = %e,
+                    "audio HTTP server exited"
+                );
+            }
+        });
+    }
 
     info!("Starting bot...");
 
@@ -124,7 +202,7 @@ async fn async_main() -> Result<(), Error> {
     tokio::select! {
         result = client_handle => {
             if let Err(err) = result {
-                eprintln!("Error running the bot: {err}");
+                error!(target: ERROR_TARGET, error = %err, "Bot runtime error");
             }
         }
         _ = tokio::signal::ctrl_c() => {
@@ -135,7 +213,7 @@ async fn async_main() -> Result<(), Error> {
     // Save data before shutting down
     info!("Saving bot data...");
     if let Err(err) = data_clone.save().await {
-        eprintln!("Error saving bot data: {err}");
+        error!(target: ERROR_TARGET, error = %err, "Error saving bot data");
     }
 
     info!("Bot shutdown complete");

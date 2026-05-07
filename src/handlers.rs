@@ -1,40 +1,76 @@
-use poise::serenity_prelude::{self as serenity, Context, EventHandler, Guild, GuildId, Ready};
+use crate::EVENT_TARGET;
+#[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
+use crate::Data;
+use poise::serenity_prelude::{self as serenity, Context, EventHandler, FullEvent};
+
+use core::fmt;
 use tracing::{info, warn};
 
 pub struct Handler;
 
 #[serenity::async_trait]
 impl EventHandler for Handler {
-    /// Called when the bot is ready, but the cache may not be fully populated yet.
-    async fn ready(&self, ctx: Context, ready: Ready) {
-        let user_name = ready.user.name.clone();
-        let shard_id = ctx.shard_id;
-        let ready_guild_count = ready.guilds.len();
-        info!(
-            "Connected as {user_name}, shard {shard_id}, ready payload lists {ready_guild_count} guild(s)"
-        );
-    }
-
-    /// Called when the cache is fully populated.
-    async fn cache_ready(&self, ctx: Context, guilds: Vec<GuildId>) {
-        let guild_count_cache = ctx.cache.guild_count();
-        let guild_count = guilds.len();
-        if guild_count != guild_count_cache {
-            warn!(
-                "Cache guild count mismatch: {guild_count_cache} (cache) vs {guild_count} (actual)"
-            );
+    /// Single dispatch entrypoint replacing the per-event methods that older
+    /// serenity exposed (`ready`, `cache_ready`, `guild_create`, …). Keep this
+    /// match short — long-running work should be spawned off.
+    async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
+        match event {
+            FullEvent::Ready { data_about_bot, .. } => {
+                info!(
+                    target: EVENT_TARGET,
+                    user = %data_about_bot.user.name,
+                    shard = ctx.shard_id.0,
+                    guild_count = data_about_bot.guilds.len(),
+                    "Bot connected (ready payload)"
+                );
+                // Backend startup hook (Lavalink connect, etc.). Failure is
+                // non-fatal — admins can retry via /lavalink connect.
+                #[cfg(all(feature = "music-core", any(feature = "lavalink", feature = "native")))]
+                {
+                    let data = ctx.data::<Data>();
+                    if let Err(e) = data.music.on_ready(&ctx.http, data_about_bot.user.id).await {
+                        warn!(
+                            target: "bot_template_rs::music",
+                            error = %e,
+                            "music backend on_ready failed"
+                        );
+                    }
+                }
+            }
+            FullEvent::CacheReady { guilds, .. } => {
+                let guild_count_cache = ctx.cache.guild_count();
+                let guild_count = guilds.len();
+                if guild_count != guild_count_cache {
+                    warn!(
+                        target: EVENT_TARGET,
+                        cache_count = guild_count_cache,
+                        payload_count = guild_count,
+                        "Cache guild count mismatch"
+                    );
+                }
+                info!(
+                    target: EVENT_TARGET,
+                    guild_count, "Cache ready"
+                );
+            }
+            FullEvent::GuildCreate { guild, is_new, .. } => {
+                info!(
+                    target: EVENT_TARGET,
+                    guild_id = %guild.id,
+                    guild_name = %guild.name,
+                    is_new = ?is_new,
+                    cache_size = ctx.cache.guild_count(),
+                    "guild_create"
+                );
+            }
+            _ => {}
         }
-        info!("Cache ready! The bot is in {guild_count} guild(s)");
     }
+}
 
-    async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
-        info!(
-            "guild_create: id={} name={} is_new={:?} cache_size_now={}",
-            guild.id,
-            guild.name,
-            is_new,
-            ctx.cache.guild_count()
-        );
+impl fmt::Debug for Handler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Handler").finish_non_exhaustive()
     }
 }
 
@@ -42,20 +78,9 @@ impl EventHandler for Handler {
 mod tests {
     use super::*;
 
-    // Test the Handler struct can be created
     #[test]
-    fn test_handler_creation() {
-        let _handler = Handler;
-        let _another_handler = Handler;
-        assert!(true, "Handler can be created");
-    }
-
-    // Since we can't easily mock Context and Ready objects due to their complex structure,
-    // we'll test what we can about our handler implementation.
-    #[test]
-    fn test_handler_implements_event_handler() {
-        // This test verifies at compile time that Handler implements EventHandler
-        fn assert_impl<T: EventHandler>() {}
-        assert_impl::<Handler>();
+    fn handler_implements_event_handler() {
+        fn _assert<T: EventHandler>() {}
+        _assert::<Handler>();
     }
 }

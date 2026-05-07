@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use poise::CreateReply;
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateEmbed, Http, MessageId};
+use serenity::{CreateAttachment, CreateEmbed, GenericChannelId, Http, MessageId};
 use tracing::debug;
 
 use crate::{Context, Error};
@@ -19,34 +19,40 @@ use crate::{Context, Error};
 /// deletes the slot's previous message (if any) before posting the new one.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Slot {
+    #[cfg(feature = "music-core")]
     NowPlaying,
+    #[cfg(feature = "music-core")]
     QueueView,
+    #[cfg(feature = "music-core")]
     Status,
+    BotStatus,
     Generic(Cow<'static, str>),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct TrackedMessage {
-    pub channel_id: ChannelId,
+    pub channel_id: GenericChannelId,
     pub message_id: MessageId,
 }
 
 impl TrackedMessage {
     pub async fn delete(&self, http: &Http) -> serenity::Result<()> {
-        self.channel_id.delete_message(http, self.message_id).await
+        http.delete_message(self.channel_id, self.message_id, None).await
     }
 }
 
 #[derive(Default)]
 pub struct Reply {
     content: Option<String>,
-    embeds: Vec<CreateEmbed>,
+    embeds: Vec<CreateEmbed<'static>>,
+    attachments: Vec<CreateAttachment<'static>>,
     ephemeral: bool,
     slot: Option<Slot>,
     auto_delete: Option<Duration>,
     delete_invoker: bool,
 }
 
+#[allow(dead_code)]
 impl Reply {
     #[must_use]
     pub fn new() -> Self {
@@ -60,8 +66,14 @@ impl Reply {
     }
 
     #[must_use]
-    pub fn embed(mut self, e: CreateEmbed) -> Self {
+    pub fn embed(mut self, e: CreateEmbed<'static>) -> Self {
         self.embeds.push(e);
+        self
+    }
+
+    #[must_use]
+    pub fn attachment(mut self, a: CreateAttachment<'static>) -> Self {
+        self.attachments.push(a);
         self
     }
 
@@ -78,7 +90,6 @@ impl Reply {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn auto_delete(mut self, d: Duration) -> Self {
         self.auto_delete = Some(d);
         self
@@ -118,8 +129,8 @@ pub async fn send(
     let http = ctx.serenity_context().http.clone();
     let guild_id = ctx.guild_id();
 
-    if let (Some(slot), Some(gid)) = (reply.slot.as_ref(), guild_id) {
-        if let Some((_, old)) = ctx.data().tracked_messages.remove(&(gid, slot.clone())) {
+    if let (Some(slot), Some(gid)) = (reply.slot.as_ref(), guild_id)
+        && let Some((_, old)) = ctx.data().tracked_messages.remove(&(gid, slot.clone())) {
             let http_clone = http.clone();
             tokio::spawn(async move {
                 if let Err(e) = old.delete(&http_clone).await {
@@ -131,14 +142,13 @@ pub async fn send(
                 }
             });
         }
-    }
 
-    if reply.delete_invoker {
-        if let poise::Context::Prefix(pctx) = ctx {
+    if reply.delete_invoker
+        && let poise::Context::Prefix(pctx) = ctx {
             let msg = pctx.msg.clone();
             let http_clone = http.clone();
             tokio::spawn(async move {
-                if let Err(e) = msg.delete(&http_clone).await {
+                if let Err(e) = msg.delete(&http_clone, None).await {
                     // Typically missing MANAGE_MESSAGES — intentionally quiet.
                     debug!(
                         target: "bot_template_rs::reply",
@@ -148,7 +158,6 @@ pub async fn send(
                 }
             });
         }
-    }
 
     let mut create = CreateReply::default().ephemeral(reply.ephemeral);
     if let Some(c) = reply.content {
@@ -156,6 +165,9 @@ pub async fn send(
     }
     for e in reply.embeds {
         create = create.embed(e);
+    }
+    for a in reply.attachments {
+        create = create.attachment(a);
     }
 
     let handle = ctx.send(create).await?;

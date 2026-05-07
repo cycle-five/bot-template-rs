@@ -6,9 +6,9 @@ edition = "2024"
 
 [dependencies]
 dashmap = "6.1.0"
-serenity = { version = "0.12.5", features = ["voice"] }
-poise = "0.6.1"
-tokio = { version = "1.51.1", features = [
+serenity = { git = "https://github.com/CycleFive/serenity", branch = "next", default-features = false, features = ["rustls_backend", "voice"] }
+poise = { git = "https://github.com/serenity-rs/poise", branch = "serenity-next", default-features = false, features = ["cache", "chrono", "handle_panics"] }
+tokio = { version = "1.52.2", features = [
   "rt-multi-thread",
   "fs",
   "signal",
@@ -18,8 +18,30 @@ tokio = { version = "1.51.1", features = [
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
 dotenvy = "0.15"
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls",
+  "json",
+  "multipart",
+  "query",
+], optional = true }
+# Declared directly so we can enable the container/codec features songbird's
+# native driver needs to probe yt-dlp's output (WebM/MKV, Ogg, etc.). Cargo
+# feature unification forwards these into songbird's own use of symphonia.
+symphonia = { version = "0.5", default-features = false, features = [
+  "all-formats",
+  "all-codecs",
+], optional = true }
+# Ogg container + zip packaging for the `record` feature.
+ogg = { version = "0.9", optional = true }
+zip = { version = "8", default-features = false, features = [
+  "deflate",
+], optional = true }
+# HTTP server for serving bot-generated audio (TTS) to external pullers
+# like the lavalink node. Only compiled in for the `tts` feature.
+axum = { version = "0.8", optional = true }
 
 # Logging and tracing
 tracing = "0.1"
@@ -27,18 +49,103 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 
-# Voice / music
-songbird = { version = "0.5", default-features = false, features = [
+# Voice / music (optional, gated by `music` and `lavalink` features).
+#
+# songbird 0.6 adds DAVE support, which Discord is making mandatory. We use
+# it directly for gateway/driver. lavalink-rs 0.15's `songbird` feature
+# pulls songbird 0.5, which would produce a second incompatible version in
+# the tree — disable it and construct lavalink `ConnectionInfo` manually in
+# `src/lavalink.rs` instead.
+songbird = { git = "https://github.com/CycleFive/songbird", branch = "bot-template-experiment", default-features = false, features = [
   "gateway",
   "serenity",
-  "native",
-] }
-lavalink-rs = { version = "0.15", default-features = false, features = [
-  "songbird",
+  "rustls",
+], optional = true }
+lavalink-rs = { git = "https://gitlab.com/cycle.five/lavalink-rs", branch = "bot-template-experiment", default-features = false, features = [
   "serenity",
-  "tungstenite-native-tls",
+  "tungstenite-rustls-webpki-roots",
   "macros",
-] }
+], optional = true }
 
 [dev-dependencies]
 mockall = "0.14.0"
+tempfile = "3"
+
+[features]
+default = ["music", "lavalink"]
+
+# --- Internal capability flags (not enabled directly) ---
+# Base voice wiring (songbird).
+voice = ["dep:songbird"]
+# Compiles the backend-agnostic music module and MusicBackend trait.
+music-core = ["dep:reqwest", "dep:serde_json"]
+
+# --- Playback backends ---
+# Lavalink client plus admin commands (/lavalink show/set/connect).
+lavalink = ["voice", "dep:lavalink-rs"]
+# Native in-process playback via songbird's driver. Currently resolves
+# tracks through songbird's `YoutubeDl` input, which shells out to `yt-dlp`
+# on PATH. A follow-up will add pure-Rust extraction via `rusty_ytdl`, with
+# yt-dlp retained as a fallback.
+native = [
+  "voice",
+  "songbird/driver",
+  "songbird/builtin-queue",
+  "songbird/tungstenite",
+  "dep:reqwest",
+  "dep:symphonia",
+]
+
+# --- User feature bundles ---
+# Music commands (/play, /queue, etc.) with the Lavalink backend.
+music = ["music-core", "lavalink"]
+# Music commands with the native backend.
+music-native = ["music-core", "native"]
+# User-owned playlists: save/load/list/feature. Persists to YAML files via
+# the PlaylistStore trait; alternative stores (SQLite, etc.) can slot in.
+playlists = ["music-core"]
+# Voice receive capability (only songbird can do this; lavalink never receives).
+# Pulls the driver because songbird's event system lives under that feature.
+voice-recv = [
+  "voice",
+  "songbird/driver",
+  "songbird/receive",
+  "songbird/tungstenite",
+]
+# Text-to-speech via https://github.com/GnomedDev/tts-service (HTTP microservice
+# used by https://github.com/Discord-TTS/Bot). Plays through songbird's native
+# driver on the native backend; on lavalink, synthesized audio is served via
+# the embedded axum HTTP layer and fetched by the lavalink node.
+tts = ["native", "dep:axum"]
+# Per-user Opus-in-Ogg recording, packaged as a zip on /record stop.
+# Works alongside either playback backend since receive and playback are
+# independent concerns at the songbird layer.
+record = ["voice-recv", "dep:ogg", "dep:zip"]
+# Speech-to-text via any OpenAI-compatible `/v1/audio/transcriptions`
+# endpoint — lemonfox.ai, OpenAI, Groq, Fireworks, or a self-hosted
+# `ghcr.io/speaches-ai/speaches` sidecar. Provider is picked at runtime
+# via env/config, no separate compile-time backend needed.
+stt = ["record", "dep:reqwest", "dep:serde_json"]
+# Cross-guild voice bridging ("radio"). One bot instance in multiple
+# guilds, PCM passthrough via an in-process broadcast channel. Audio
+# flows over Discord's voice servers on both legs — no bot-to-bot
+# transport, no public IP exposure.
+radio = ["voice-recv", "songbird/builtin-queue"]
+
+# Redirect every "github.com/serenity-rs/serenity" git source (used by
+# songbird-fork's serenity-next branch, poise's serenity-next branch, and
+# lavalink-rs) to the CycleFive fork so the whole tree resolves to a
+# single serenity package.
+[patch."https://github.com/serenity-rs/serenity"]
+serenity = { git = "https://github.com/CycleFive/serenity", branch = "next" }
+
+# Same idea for songbird — lavalink-rs pulls songbird via git, redirect
+# to the fork so we don't end up with two songbird instances.
+[patch."https://github.com/serenity-rs/songbird"]
+songbird = { git = "https://github.com/CycleFive/songbird", branch = "bot-template-experiment" }
+
+# stream_lib is pulled in transitively by songbird/driver. Crates.io
+# stream_lib 0.5.2 pins reqwest 0.12, which type-mismatches against the
+# rest of the stack on reqwest 0.13. Our fork bumps it.
+[patch.crates-io]
+stream_lib = { git = "https://github.com/CycleFive/rsget", branch = "bot-template-experiment" }

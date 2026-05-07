@@ -1,0 +1,121 @@
+# Bot + GnomedDev/tts-service wired together on a private compose network.
+#
+# tts-service uses the upstream prebuilt image from Docker Hub. If you need
+# to build from source instead (e.g. to patch the service), swap `image:`
+# for `build: context: ../tts-service`.
+#
+# The bot reaches the TTS service via the compose-internal hostname
+# `tts-service`, so TTS_SERVICE_URL is pinned to http://tts-service:3000
+# regardless of what .env says.
+#
+# Lavalink is not included here. If you use the lavalink music backend,
+# either run a lavalink node on the host (and reach it via
+# host.docker.internal:2333, already wired via extra_hosts below) or add
+# your own `lavalink:` service and point LAVALINK_HOST at it.
+
+services:
+  init-perms:
+    image: alpine:3.20
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 1000:1000 /data && chmod -R u+rwX /data"]
+    volumes:
+      - speaches-models:/data
+    restart: "no"
+  # Speech-to-text sidecar (OpenAI-compatible Whisper server). Off by default;
+  # start with: `docker compose --profile stt up`. Use the CUDA image instead
+  # of CPU if you have an Nvidia GPU passed through. Models are cached in the
+  # `speaches-models` volume after first download.
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    profiles: ["stt"]
+    # Upstream image runs as `ubuntu` (UID 1000). Docker creates named-volume
+    # mount points owned by root:root, so huggingface_hub can't mkdir the
+    # cache under /data. Running as root sidesteps the chown dance. For a
+    # more locked-down setup, swap this for an init container that chowns
+    # the volume to 1000:1000 before speaches starts.
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
+    environment:
+      HF_HOME: /data/huggingface
+      HF_HUB_CACHE: /data/huggingface/hub
+    volumes:
+      - speaches-models:/data
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+
+  tts-service:
+    # Layered on top of gnomeddev/tts-service:latest; see Dockerfile.tts
+    # for why the gcloud dummy key is baked in rather than mounted.
+    build:
+      context: .
+      dockerfile: Dockerfile.tts
+    environment:
+      BIND_ADDR: 0.0.0.0:3000
+      LOG_LEVEL: ${TTS_LOG_LEVEL:-INFO}
+      IPV6_BLOCK: ${TTS_IPV6_BLOCK:-DISABLE}
+      # AUTH_KEY intentionally unset: tts-service treats Some("") as
+      # "auth required, expected value is empty", which breaks all
+      # requests. To enable auth, set TTS_AUTH_KEY in .env and add
+      # `AUTH_KEY: ${TTS_AUTH_KEY}` back here.
+    restart: unless-stopped
+    expose:
+      - "3000"
+
+  bot:
+    build:
+      context: .
+      args:
+        FEATURES: ${BOT_FEATURES:-music music-native playlists record tts stt radio}
+    depends_on:
+      - tts-service
+    env_file:
+      - .env
+    environment:
+      # Override .env's TTS_SERVICE_URL so the bot reaches the sibling
+      # container by its compose service name.
+      TTS_SERVICE_URL: http://tts-service:3000
+      # Default lavalink target if a host-side node is running.
+      LAVALINK_HOST: ${LAVALINK_HOST:-host.docker.internal:2333}
+      # Pass these explicitly so remote docker contexts (where env_file
+      # shipping can be flaky) still see them. Compose expands from your
+      # local .env at parse time.
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DISCORD_DEV_GUILD: ${DISCORD_DEV_GUILD:-}
+      BOT_PUBLIC_URL: ${BOT_PUBLIC_URL:-}
+      BOT_HTTP_BIND_ADDR: ${BOT_HTTP_BIND_ADDR:-0.0.0.0:8080}
+      BOT_AUDIO_TTL_SECS: ${BOT_AUDIO_TTL_SECS:-60}
+      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:-youshallnotpass}
+      LAVALINK_SSL: ${LAVALINK_SSL:-false}
+      MUSIC_BACKEND: ${MUSIC_BACKEND:-lavalink}
+      TTS_MODE: ${TTS_MODE:-eSpeak}
+      TTS_VOICE: ${TTS_VOICE:-en}
+      TTS_SPEAKING_RATE: ${TTS_SPEAKING_RATE:-1.0}
+      TTS_MAX_LENGTH: ${TTS_MAX_LENGTH:-200}
+      TTS_PREFERRED_FORMAT: ${TTS_PREFERRED_FORMAT:-wav}
+      TTS_AUTH_KEY: ${TTS_AUTH_KEY:-}
+      STT_BASE_URL: ${STT_BASE_URL:-http://speaches:8000/v1}
+      STT_API_KEY: ${STT_API_KEY:-}
+      # Speaches expects Hugging Face repo names (faster-whisper),
+      # not the OpenAI alias `whisper-1`. For API providers (lemonfox,
+      # OpenAI, Groq), override this to `whisper-1` in .env.
+      STT_MODEL: ${STT_MODEL:-Systran/faster-whisper-small}
+      STT_LANGUAGE: ${STT_LANGUAGE:-}
+      RUST_LOG: ${RUST_LOG:-bot_template_rs=debug,lavalink_rs=info,serenity=warn}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    # Bot's HTTP layer for serving TTS audio to a remote lavalink node.
+    # Published (not just exposed) so a cloudflared instance outside this
+    # compose network — e.g. running on a sibling LXC or another host —
+    # can reach it at http://<this-host>:8080. Change "8080:8080" to
+    # "127.0.0.1:8080:8080" if you want to restrict to loopback.
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  speaches-models:
