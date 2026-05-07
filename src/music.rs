@@ -354,6 +354,95 @@ pub async fn remove_dupes(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Parse a user-supplied timestamp into a Duration.
+///
+/// Accepts:
+/// - bare seconds (`83`)
+/// - `mm:ss` (`1:23`)
+/// - `hh:mm:ss` (`1:02:03`)
+/// - `<n>s` / `<n>m` / `<n>h` suffixes (`83s`, `2m`, `1h`)
+fn parse_timestamp(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(num) = s.strip_suffix('s') {
+        return num.trim().parse::<u64>().ok().map(std::time::Duration::from_secs);
+    }
+    if let Some(num) = s.strip_suffix('m') {
+        return num
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|m| std::time::Duration::from_secs(m * 60));
+    }
+    if let Some(num) = s.strip_suffix('h') {
+        return num
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|h| std::time::Duration::from_secs(h * 3600));
+    }
+    if s.contains(':') {
+        let parts: Vec<&str> = s.split(':').collect();
+        let nums: Option<Vec<u64>> = parts.iter().map(|p| p.parse::<u64>().ok()).collect();
+        let nums = nums?;
+        return match nums.len() {
+            2 => Some(std::time::Duration::from_secs(nums[0] * 60 + nums[1])),
+            3 => Some(std::time::Duration::from_secs(
+                nums[0] * 3600 + nums[1] * 60 + nums[2],
+            )),
+            _ => None,
+        };
+    }
+    s.parse::<u64>().ok().map(std::time::Duration::from_secs)
+}
+
+/// Seek the currently playing track to a timestamp.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn seek(
+    ctx: Context<'_>,
+    #[description = "e.g. 1:23, 83, 1:02:03, 90s, 2m"] timestamp: String,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let Some(position) = parse_timestamp(&timestamp) else {
+        status(
+            &ctx,
+            "Couldn't parse timestamp. Try `1:23`, `83`, `1:02:03`, `90s`, `2m`.",
+            true,
+        )
+        .await?;
+        return Ok(());
+    };
+    ctx.data().music.seek(guild_id, position).await?;
+    let secs = position.as_secs();
+    let formatted = if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    };
+    now_playing(&ctx, music_embed("Seek", format!("→ {formatted}"))).await?;
+    Ok(())
+}
+
+/// Set the playback volume (0-200, default 100).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn volume(
+    ctx: Context<'_>,
+    #[description = "0-200 (percent); 100 is default, anything over 200 is clamped"]
+    level: u16,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let clamped = level.min(200);
+    ctx.data().music.set_volume(guild_id, clamped).await?;
+    now_playing(
+        &ctx,
+        music_embed("Volume", format!("Set to {clamped}%.")),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Drop queued tracks belonging to users no longer in the bot's voice channel.
 #[poise::command(slash_command, prefix_command, guild_only, rename = "leavecleanup")]
 pub async fn leave_cleanup(ctx: Context<'_>) -> Result<(), Error> {
@@ -564,6 +653,23 @@ mod tests {
 
         assert!(play().guild_only);
         assert!(skip().guild_only);
+    }
+
+    #[test]
+    fn parse_timestamp_accepts_all_documented_forms() {
+        use std::time::Duration;
+        assert_eq!(parse_timestamp("83"), Some(Duration::from_secs(83)));
+        assert_eq!(parse_timestamp("1:23"), Some(Duration::from_secs(83)));
+        assert_eq!(parse_timestamp("1:02:03"), Some(Duration::from_secs(3723)));
+        assert_eq!(parse_timestamp("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_timestamp("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_timestamp("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_timestamp("  45  "), Some(Duration::from_secs(45)));
+        // Invalid forms.
+        assert_eq!(parse_timestamp(""), None);
+        assert_eq!(parse_timestamp("abc"), None);
+        assert_eq!(parse_timestamp("1:2:3:4"), None);
+        assert_eq!(parse_timestamp("1:xx"), None);
     }
 
     #[test]

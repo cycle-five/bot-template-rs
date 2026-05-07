@@ -711,6 +711,26 @@ impl MusicBackend for LavalinkBackend {
         }
         Ok(dropped)
     }
+
+    async fn seek(
+        &self,
+        guild: serenity::GuildId,
+        position: std::time::Duration,
+    ) -> Result<(), Error> {
+        let player = self.player(guild).await?;
+        player.set_position(position).await?;
+        Ok(())
+    }
+
+    async fn set_volume(&self, guild: serenity::GuildId, percent: u16) -> Result<(), Error> {
+        // Cap at 200 — anything higher is screech territory and we want
+        // uniform behavior across backends. Lavalink itself accepts up to
+        // 1000.
+        let v = percent.min(200);
+        let player = self.player(guild).await?;
+        player.set_volume(v).await?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

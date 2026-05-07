@@ -65,12 +65,25 @@ fn apply_perm<T>(arr: &mut [T], mut perm: Vec<usize>) {
     }
 }
 
-#[derive(Default)]
 struct GuildMeta {
     /// Parallel metadata for queued tracks (positions match songbird's queue
     /// order, minus the current track). `now_playing` holds the head.
     queue: std::collections::VecDeque<Track>,
     now_playing: Option<Track>,
+    /// Per-guild playback volume as a fraction (1.0 = 100%). Persisted
+    /// across track changes — applied to the current TrackHandle on
+    /// /volume and to each new track at enqueue time.
+    volume: f32,
+}
+
+impl Default for GuildMeta {
+    fn default() -> Self {
+        Self {
+            queue: std::collections::VecDeque::new(),
+            now_playing: None,
+            volume: 1.0,
+        }
+    }
 }
 
 /// Fires when songbird ends a track (natural end, skip, or stop). Advances
@@ -207,6 +220,10 @@ impl MusicBackend for NativeBackend {
         let queue_len = handler.queue().current_queue().len();
         drop(handler);
 
+        // Apply the guild's persistent volume to the new track so /volume
+        // settings survive across enqueues.
+        let _ = track_handle.set_volume(meta.volume);
+
         // Attach the end-of-track advancer so our parallel metadata follows
         // songbird's own queue as it progresses.
         if let Err(e) = track_handle.add_event(
@@ -260,6 +277,8 @@ impl MusicBackend for NativeBackend {
         let track_handle = handler.enqueue_input(Input::from(src)).await;
         let queue_len = handler.queue().current_queue().len();
         drop(handler);
+
+        let _ = track_handle.set_volume(meta.volume);
 
         if let Err(e) = track_handle.add_event(
             Event::Track(TrackEvent::End),
@@ -538,6 +557,32 @@ impl MusicBackend for NativeBackend {
             });
         }
         Ok(dropped)
+    }
+
+    async fn seek(
+        &self,
+        guild: GuildId,
+        position: std::time::Duration,
+    ) -> Result<(), Error> {
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        let handler = call.lock().await;
+        if let Some(current) = handler.queue().current() {
+            current.seek_async(position).await?;
+        }
+        Ok(())
+    }
+
+    async fn set_volume(&self, guild: GuildId, percent: u16) -> Result<(), Error> {
+        let v = (percent.min(200) as f32) / 100.0;
+        // Persist for new tracks, then apply to the current TrackHandle.
+        self.guild_meta(guild).lock().await.volume = v;
+        if let Some(call) = self.songbird.get(guild) {
+            let handler = call.lock().await;
+            if let Some(current) = handler.queue().current() {
+                let _ = current.set_volume(v);
+            }
+        }
+        Ok(())
     }
 
     async fn leave_cleanup(

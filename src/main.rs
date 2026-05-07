@@ -83,6 +83,8 @@ fn framework_options(prefix: String) -> poise::FrameworkOptions<Data, Error> {
                 music::remove(),
                 music::remove_dupes(),
                 music::leave_cleanup(),
+                music::seek(),
+                music::volume(),
             ]);
             #[cfg(feature = "playlists")]
             v.push(playlist::playlist());

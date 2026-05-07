@@ -160,6 +160,19 @@ pub trait MusicBackend: Send + Sync + 'static {
         guild: GuildId,
         present: &[UserId],
     ) -> Result<usize, Error>;
+
+    /// Seek the currently playing track to `position`.
+    async fn seek(
+        &self,
+        guild: GuildId,
+        position: std::time::Duration,
+    ) -> Result<(), Error>;
+
+    /// Set the player volume. Range is 0–200 (percent), where 100 is the
+    /// default. Backends may clamp differently — lavalink supports up to
+    /// 1000, native (songbird) accepts arbitrary `f32` and we cap at 200
+    /// to keep behavior uniform across the two.
+    async fn set_volume(&self, guild: GuildId, percent: u16) -> Result<(), Error>;
 }
 
 #[cfg(test)]
