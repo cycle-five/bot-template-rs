@@ -32,6 +32,9 @@ reqwest = { version = "0.13", default-features = false, features = [
 # leaving rustls unable to auto-pick one. We pick `aws-lc-rs` explicitly
 # (matches reqwest's `__rustls-aws-lc-rs` selection).
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# Already in the tree via tungstenite; declared directly so /shuffle and
+# (later) /autoplay can use it without an extra dep at a different version.
+rand = "0.9"
 # Declared directly so we can enable the container/codec features songbird's
 # native driver needs to probe yt-dlp's output (WebM/MKV, Ogg, etc.). Cargo
 # feature unification forwards these into songbird's own use of symphonia.

@@ -37,6 +37,34 @@ use tracing::debug;
 use crate::Error;
 use crate::music_backend::{BackendKind, MusicBackend, PlayResult, Track};
 
+/// Apply an in-place permutation to `arr`. After the call, the element that
+/// was originally at position `perm[i]` ends up at position `i` (pull
+/// semantics). Consumes `perm` (mutates internally to track completed
+/// positions). Used by `shuffle` to apply the *same* random permutation to
+/// the metadata queue and songbird's internal queue so they stay in lock-step.
+fn apply_perm<T>(arr: &mut [T], mut perm: Vec<usize>) {
+    debug_assert_eq!(arr.len(), perm.len());
+    let n = arr.len();
+    for i in 0..n {
+        if perm[i] == i {
+            continue;
+        }
+        // Walk the cycle that starts at `i`, swapping each link into place
+        // until we wrap back to `i`.
+        let mut cur = i;
+        loop {
+            let next = perm[cur];
+            if next == i {
+                break;
+            }
+            arr.swap(cur, next);
+            perm[cur] = cur;
+            cur = next;
+        }
+        perm[cur] = cur;
+    }
+}
+
 #[derive(Default)]
 struct GuildMeta {
     /// Parallel metadata for queued tracks (positions match songbird's queue
@@ -345,11 +373,236 @@ impl MusicBackend for NativeBackend {
         let meta = meta_arc.lock().await;
         Ok(meta.queue.iter().cloned().collect())
     }
+
+    async fn shuffle(&self, guild: GuildId) -> Result<(), Error> {
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+
+        // Same permutation applied to both songbird's internal queue and our
+        // parallel metadata, keeping them in lock-step. Index space is the
+        // *upcoming* queue — songbird's q[0] is the currently playing track,
+        // metadata holds it in `now_playing`, neither moves.
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+        let len = meta.queue.len();
+        if len < 2 {
+            return Ok(());
+        }
+        use rand::seq::SliceRandom;
+        let mut perm: Vec<usize> = (0..len).collect();
+        perm.shuffle(&mut rand::rng());
+
+        apply_perm(meta.queue.make_contiguous(), perm.clone());
+
+        let handler = call.lock().await;
+        handler.queue().modify_queue(|q| {
+            if q.len() <= 2 {
+                return;
+            }
+            let slice = q.make_contiguous();
+            // q[0] is currently playing; shuffle the upcoming portion only.
+            // If songbird has diverged from metadata (track ended between
+            // locks), truncate the perm to whatever matches.
+            let upcoming = &mut slice[1..];
+            let n = upcoming.len().min(perm.len());
+            apply_perm(&mut upcoming[..n], perm[..n].to_vec());
+        });
+        Ok(())
+    }
+
+    async fn jump(&self, guild: GuildId, index: usize) -> Result<Option<Track>, Error> {
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+
+        if index == 0 {
+            return Ok(self.guild_meta(guild).lock().await.now_playing.clone());
+        }
+
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+        if index > meta.queue.len() {
+            return Ok(None);
+        }
+        // Drop everything before the target so the next end-of-track advances
+        // to it. AdvanceOnEnd pops front from meta.queue, so to land on the
+        // target track we drop `index - 1` items first; calling skip then
+        // ends the current track and advances into target.
+        for _ in 0..(index.saturating_sub(1)) {
+            meta.queue.pop_front();
+        }
+        let target = meta.queue.front().cloned();
+
+        let handler = call.lock().await;
+        handler.queue().modify_queue(|q| {
+            // Mirror the metadata drop in songbird's queue.
+            if q.len() < 2 {
+                return;
+            }
+            let drop_count = (index.saturating_sub(1)).min(q.len() - 1);
+            let drained: Vec<_> = q.drain(1..=drop_count).collect();
+            // Stop the dropped tracks per modify_queue's safety contract.
+            for queued in drained {
+                let _ = queued.stop();
+            }
+        });
+        let _ = handler.queue().skip();
+        Ok(target)
+    }
+
+    async fn move_track(
+        &self,
+        guild: GuildId,
+        from: usize,
+        to: usize,
+    ) -> Result<(), Error> {
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+        if from >= meta.queue.len() || to >= meta.queue.len() || from == to {
+            return Ok(());
+        }
+        if let Some(item) = meta.queue.remove(from) {
+            meta.queue.insert(to, item);
+        }
+
+        let handler = call.lock().await;
+        handler.queue().modify_queue(|q| {
+            // Indices in the upcoming queue translate to q[1+i] (q[0] is current).
+            let from_q = 1 + from;
+            let to_q = 1 + to;
+            if from_q >= q.len() || to_q >= q.len() || from_q == to_q {
+                return;
+            }
+            // VecDeque has no direct move; remove and re-insert.
+            if let Some(item) = q.remove(from_q) {
+                q.insert(to_q, item);
+            }
+        });
+        Ok(())
+    }
+
+    async fn remove_at(
+        &self,
+        guild: GuildId,
+        index: usize,
+    ) -> Result<Option<Track>, Error> {
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+        let removed_meta = meta.queue.remove(index);
+
+        if removed_meta.is_some() {
+            let handler = call.lock().await;
+            handler.queue().modify_queue(|q| {
+                let q_idx = 1 + index;
+                if q_idx < q.len()
+                    && let Some(removed) = q.remove(q_idx) {
+                    let _ = removed.stop();
+                }
+            });
+        }
+        Ok(removed_meta)
+    }
+
+    async fn remove_duplicates(&self, guild: GuildId) -> Result<usize, Error> {
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+        let original = meta.queue.len();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut keep: Vec<bool> = Vec::with_capacity(original);
+        for t in &meta.queue {
+            let key = t
+                .uri
+                .clone()
+                .unwrap_or_else(|| format!("{}\u{1}{}", t.title, t.author));
+            keep.push(seen.insert(key));
+        }
+        // Drop from the back so indices stay valid.
+        for i in (0..original).rev() {
+            if !keep[i] {
+                meta.queue.remove(i);
+            }
+        }
+        let dropped = original - meta.queue.len();
+        if dropped > 0 {
+            let handler = call.lock().await;
+            handler.queue().modify_queue(|q| {
+                for i in (0..keep.len()).rev() {
+                    if !keep[i] {
+                        let q_idx = 1 + i;
+                        if q_idx < q.len()
+                            && let Some(removed) = q.remove(q_idx) {
+                            let _ = removed.stop();
+                        }
+                    }
+                }
+            });
+        }
+        Ok(dropped)
+    }
+
+    async fn leave_cleanup(
+        &self,
+        guild: GuildId,
+        present: &[UserId],
+    ) -> Result<usize, Error> {
+        let call = self.songbird.get(guild).ok_or("not in voice")?;
+        let meta_arc = self.guild_meta(guild);
+        let mut meta = meta_arc.lock().await;
+        let present_set: std::collections::HashSet<u64> =
+            present.iter().map(|u| u.get()).collect();
+        let original = meta.queue.len();
+        let keep: Vec<bool> = meta
+            .queue
+            .iter()
+            .map(|t| t.requester.is_none_or(|id| present_set.contains(&id)))
+            .collect();
+        for i in (0..original).rev() {
+            if !keep[i] {
+                meta.queue.remove(i);
+            }
+        }
+        let dropped = original - meta.queue.len();
+        if dropped > 0 {
+            let handler = call.lock().await;
+            handler.queue().modify_queue(|q| {
+                for i in (0..keep.len()).rev() {
+                    if !keep[i] {
+                        let q_idx = 1 + i;
+                        if q_idx < q.len()
+                            && let Some(removed) = q.remove(q_idx) {
+                            let _ = removed.stop();
+                        }
+                    }
+                }
+            });
+        }
+        Ok(dropped)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_perm_is_correct() {
+        // Identity perm leaves array untouched.
+        let mut a = vec!['a', 'b', 'c'];
+        apply_perm(&mut a, vec![0, 1, 2]);
+        assert_eq!(a, vec!['a', 'b', 'c']);
+
+        // Reverse perm.
+        let mut a = vec!['a', 'b', 'c', 'd'];
+        apply_perm(&mut a, vec![3, 2, 1, 0]);
+        assert_eq!(a, vec!['d', 'c', 'b', 'a']);
+
+        // Cycle perm: 0→1→2→0.
+        let mut a = vec!['a', 'b', 'c'];
+        apply_perm(&mut a, vec![1, 2, 0]);
+        // Element at perm[i] ends up at position i:
+        //   i=0 gets a[1] = 'b'; i=1 gets a[2] = 'c'; i=2 gets a[0] = 'a'.
+        assert_eq!(a, vec!['b', 'c', 'a']);
+    }
 
     #[tokio::test]
     async fn new_backend_has_no_guild_state() {

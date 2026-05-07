@@ -124,6 +124,42 @@ pub trait MusicBackend: Send + Sync + 'static {
 
     async fn now_playing(&self, guild: GuildId) -> Result<Option<Track>, Error>;
     async fn queue_snapshot(&self, guild: GuildId) -> Result<Vec<Track>, Error>;
+
+    /// Shuffle the upcoming queue in place. Does not affect the currently
+    /// playing track.
+    async fn shuffle(&self, guild: GuildId) -> Result<(), Error>;
+
+    /// Skip past tracks until the queue head is the track at `index`.
+    /// Returns the now-playing track after the jump, if any. `index = 0`
+    /// is a no-op (already at the head).
+    async fn jump(&self, guild: GuildId, index: usize) -> Result<Option<Track>, Error>;
+
+    /// Move the queued track at `from` to position `to`. Indices are 0-based
+    /// against the upcoming queue (excluding the currently playing track).
+    /// Out-of-range indices return Ok with no effect.
+    async fn move_track(
+        &self,
+        guild: GuildId,
+        from: usize,
+        to: usize,
+    ) -> Result<(), Error>;
+
+    /// Remove the queued track at `index`. Returns the removed track if any.
+    async fn remove_at(&self, guild: GuildId, index: usize) -> Result<Option<Track>, Error>;
+
+    /// Drop duplicate tracks from the queue, keeping the first occurrence
+    /// of each. Tracks with a `uri` dedupe by URI; tracks without dedupe by
+    /// (title, author). Returns the number of tracks dropped.
+    async fn remove_duplicates(&self, guild: GuildId) -> Result<usize, Error>;
+
+    /// Drop queued tracks whose `requester` is not in `present`. Used by
+    /// `/leavecleanup` to prune the queue when the requester left voice.
+    /// Tracks with no recorded requester are kept. Returns the drop count.
+    async fn leave_cleanup(
+        &self,
+        guild: GuildId,
+        present: &[UserId],
+    ) -> Result<usize, Error>;
 }
 
 #[cfg(test)]

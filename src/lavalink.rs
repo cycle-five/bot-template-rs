@@ -581,6 +581,136 @@ impl MusicBackend for LavalinkBackend {
         let items = player.get_queue().get_queue().await?;
         Ok(items.iter().map(|t| track_from_lavalink(&t.track)).collect())
     }
+
+    async fn shuffle(&self, guild: serenity::GuildId) -> Result<(), Error> {
+        use rand::seq::SliceRandom;
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        let mut v: Vec<_> = items.into();
+        v.shuffle(&mut rand::rng());
+        queue.replace(v.into())?;
+        Ok(())
+    }
+
+    async fn jump(
+        &self,
+        guild: serenity::GuildId,
+        index: usize,
+    ) -> Result<Option<Track>, Error> {
+        let player = self.player(guild).await?;
+        if index == 0 {
+            // Already at the head; treat as a no-op skip.
+            let np = player.get_player().await?.track;
+            return Ok(np.as_ref().map(track_from_lavalink));
+        }
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        if index > items.len() {
+            return Ok(None);
+        }
+        // Drop the first `index` queued tracks so the next .skip() starts on
+        // the target.
+        let kept: std::collections::VecDeque<_> = items.into_iter().skip(index).collect();
+        queue.replace(kept)?;
+        let target = player.get_queue().get_track(0).await?.map(|t| track_from_lavalink(&t.track));
+        player.skip()?;
+        Ok(target)
+    }
+
+    async fn move_track(
+        &self,
+        guild: serenity::GuildId,
+        from: usize,
+        to: usize,
+    ) -> Result<(), Error> {
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let mut items = queue.get_queue().await?;
+        if from >= items.len() || to >= items.len() || from == to {
+            return Ok(());
+        }
+        if let Some(item) = items.remove(from) {
+            items.insert(to, item);
+            queue.replace(items)?;
+        }
+        Ok(())
+    }
+
+    async fn remove_at(
+        &self,
+        guild: serenity::GuildId,
+        index: usize,
+    ) -> Result<Option<Track>, Error> {
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        let Some(item) = items.get(index).cloned() else {
+            return Ok(None);
+        };
+        queue.remove(index)?;
+        Ok(Some(track_from_lavalink(&item.track)))
+    }
+
+    async fn remove_duplicates(&self, guild: serenity::GuildId) -> Result<usize, Error> {
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        let original = items.len();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let kept: std::collections::VecDeque<_> = items
+            .into_iter()
+            .filter(|item| {
+                let key = item
+                    .track
+                    .info
+                    .uri
+                    .clone()
+                    .unwrap_or_else(|| {
+                        format!("{}\u{1}{}", item.track.info.title, item.track.info.author)
+                    });
+                seen.insert(key)
+            })
+            .collect();
+        let dropped = original - kept.len();
+        if dropped > 0 {
+            queue.replace(kept)?;
+        }
+        Ok(dropped)
+    }
+
+    async fn leave_cleanup(
+        &self,
+        guild: serenity::GuildId,
+        present: &[UserId],
+    ) -> Result<usize, Error> {
+        let player = self.player(guild).await?;
+        let queue = player.get_queue();
+        let items = queue.get_queue().await?;
+        let original = items.len();
+        let present_set: std::collections::HashSet<u64> =
+            present.iter().map(|u| u.get()).collect();
+        let kept: std::collections::VecDeque<_> = items
+            .into_iter()
+            .filter(|item| {
+                let requester = item
+                    .track
+                    .user_data
+                    .as_ref()
+                    .and_then(|v| v.get("requester_id"))
+                    .and_then(serde_json::Value::as_u64);
+                match requester {
+                    None => true, // unknown requester: keep
+                    Some(id) => present_set.contains(&id),
+                }
+            })
+            .collect();
+        let dropped = original - kept.len();
+        if dropped > 0 {
+            queue.replace(kept)?;
+        }
+        Ok(dropped)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -247,6 +247,159 @@ pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Shuffle the upcoming queue. Does not affect the currently playing track.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn shuffle(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let len = ctx.data().music.queue_snapshot(guild_id).await?.len();
+    if len < 2 {
+        status(&ctx, "Need at least 2 tracks queued to shuffle.", true).await?;
+        return Ok(());
+    }
+    ctx.data().music.shuffle(guild_id).await?;
+    now_playing(
+        &ctx,
+        music_embed("Shuffled", format!("Reordered {len} upcoming track(s).")),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Skip ahead to the upcoming track at `index` (0 = next).
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn jump(
+    ctx: Context<'_>,
+    #[description = "0-based position in the upcoming queue"] index: u32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let index = index as usize;
+    let qlen = ctx.data().music.queue_snapshot(guild_id).await?.len();
+    if index >= qlen {
+        status(
+            &ctx,
+            &format!("Queue only has {qlen} upcoming track(s)."),
+            true,
+        )
+        .await?;
+        return Ok(());
+    }
+    let target = ctx.data().music.jump(guild_id, index + 1).await?;
+    match target {
+        Some(t) => now_playing(&ctx, music_embed("Jumped", track_line(&t))).await?,
+        None => status(&ctx, "Nothing to jump to.", true).await?,
+    }
+    Ok(())
+}
+
+/// Reorder the queue: move the track at `from` to position `to`.
+#[poise::command(slash_command, prefix_command, guild_only, rename = "move")]
+pub async fn move_track(
+    ctx: Context<'_>,
+    #[description = "0-based source index"] from: u32,
+    #[description = "0-based target index"] to: u32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let from = from as usize;
+    let to = to as usize;
+    let qlen = ctx.data().music.queue_snapshot(guild_id).await?.len();
+    if from >= qlen || to >= qlen {
+        status(
+            &ctx,
+            &format!("Indices must be in 0..{qlen}."),
+            true,
+        )
+        .await?;
+        return Ok(());
+    }
+    if from == to {
+        status(&ctx, "Source and target are the same.", true).await?;
+        return Ok(());
+    }
+    ctx.data().music.move_track(guild_id, from, to).await?;
+    now_playing(
+        &ctx,
+        music_embed("Moved", format!("Track {from} → position {to}.")),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove the queued track at `index` from the upcoming queue.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn remove(
+    ctx: Context<'_>,
+    #[description = "0-based position in the upcoming queue"] index: u32,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let index = index as usize;
+    let removed = ctx.data().music.remove_at(guild_id, index).await?;
+    match removed {
+        Some(t) => now_playing(&ctx, music_embed("Removed", track_line(&t))).await?,
+        None => status(&ctx, "No track at that position.", true).await?,
+    }
+    Ok(())
+}
+
+/// Drop duplicate tracks from the queue (keeping the first occurrence).
+#[poise::command(slash_command, prefix_command, guild_only, rename = "removedupes")]
+pub async fn remove_dupes(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+    let dropped = ctx.data().music.remove_duplicates(guild_id).await?;
+    let body = if dropped == 0 {
+        "No duplicates found.".to_string()
+    } else {
+        format!("Dropped {dropped} duplicate track(s).")
+    };
+    now_playing(&ctx, music_embed("Dedupe", body)).await?;
+    Ok(())
+}
+
+/// Drop queued tracks belonging to users no longer in the bot's voice channel.
+#[poise::command(slash_command, prefix_command, guild_only, rename = "leavecleanup")]
+pub async fn leave_cleanup(ctx: Context<'_>) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().ok_or("guild only")?;
+
+    // Find the bot's current voice channel and the users in it. If the bot
+    // isn't in voice, fall back to "users currently in *any* voice channel"
+    // would be wrong — we want callers to clean up only tracks queued by
+    // people who left the listening room.
+    let bot_user_id = ctx.framework().bot_id();
+    let voice_states = ctx
+        .guild()
+        .map(|g| g.voice_states.clone())
+        .unwrap_or_default();
+    let Some(bot_channel) = voice_states
+        .get(&bot_user_id)
+        .and_then(|vs| vs.channel_id)
+    else {
+        status(&ctx, "Bot isn't in a voice channel.", true).await?;
+        return Ok(());
+    };
+    let present: Vec<serenity::UserId> = voice_states
+        .iter()
+        .filter_map(|vs| {
+            if vs.channel_id == Some(bot_channel) {
+                Some(vs.user_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let dropped = ctx
+        .data()
+        .music
+        .leave_cleanup(guild_id, &present)
+        .await?;
+    let body = if dropped == 0 {
+        "Everyone whose tracks are queued is still in the channel.".to_string()
+    } else {
+        format!("Dropped {dropped} track(s) queued by absent users.")
+    };
+    now_playing(&ctx, music_embed("Cleanup", body)).await?;
+    Ok(())
+}
+
 /// Pause the currently playing track.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
