@@ -831,11 +831,19 @@ pub async fn play_file(
 }
 
 fn is_audio_attachment(a: &serenity::Attachment) -> bool {
-    if let Some(ct) = a.content_type.as_deref()
-        && ct.starts_with("audio/") {
-            return true;
-        }
-    let name = a.filename.to_ascii_lowercase();
+    is_audio_by_type_or_name(a.content_type.as_deref(), &a.filename)
+}
+
+/// Pure inner check used by `is_audio_attachment`. Extracted so it can be
+/// unit-tested without constructing a `serenity::Attachment` (which has
+/// ~15 mandatory fields).
+fn is_audio_by_type_or_name(content_type: Option<&str>, filename: &str) -> bool {
+    if let Some(ct) = content_type
+        && ct.starts_with("audio/")
+    {
+        return true;
+    }
+    let name = filename.to_ascii_lowercase();
     matches!(
         name.rsplit('.').next(),
         Some("wav" | "mp3" | "ogg" | "opus" | "flac" | "m4a" | "aac" | "webm")
@@ -898,6 +906,29 @@ mod tests {
 
         assert!(play().guild_only);
         assert!(skip().guild_only);
+    }
+
+    #[test]
+    fn is_audio_by_type_or_name_dispatches_correctly() {
+        // content-type wins when present.
+        assert!(is_audio_by_type_or_name(Some("audio/mpeg"), "song.bin"));
+        assert!(is_audio_by_type_or_name(Some("audio/ogg"), "anything"));
+        // Falls back to extension when content-type is missing or non-audio.
+        assert!(is_audio_by_type_or_name(None, "track.mp3"));
+        assert!(is_audio_by_type_or_name(None, "Voice.OGG"));
+        assert!(is_audio_by_type_or_name(Some("application/octet-stream"), "x.flac"));
+        // Unsupported extensions and bare files are rejected.
+        assert!(!is_audio_by_type_or_name(None, "video.mp4"));
+        assert!(!is_audio_by_type_or_name(None, "no_extension"));
+        assert!(!is_audio_by_type_or_name(Some("text/plain"), "doc.txt"));
+    }
+
+    #[test]
+    fn loop_choice_maps_to_backend_enum() {
+        use crate::music_backend::LoopMode;
+        assert_eq!(LoopMode::from(LoopChoice::Off), LoopMode::Off);
+        assert_eq!(LoopMode::from(LoopChoice::Track), LoopMode::Track);
+        assert_eq!(LoopMode::from(LoopChoice::Queue), LoopMode::Queue);
     }
 
     #[test]

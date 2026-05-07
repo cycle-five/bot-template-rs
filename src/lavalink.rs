@@ -1081,6 +1081,74 @@ mod tests {
     }
 
     #[test]
+    fn filter_state_to_lavalink_neutral_emits_no_filters() {
+        let s = crate::music_backend::FilterState::neutral();
+        let f = filter_state_to_lavalink(&s);
+        assert!(f.equalizer.is_none());
+        assert!(f.timescale.is_none());
+    }
+
+    #[test]
+    fn filter_state_to_lavalink_bass_boost_sets_low_bands() {
+        let s = crate::music_backend::FilterState {
+            bass_boost: true,
+            ..crate::music_backend::FilterState::neutral()
+        };
+        let f = filter_state_to_lavalink(&s);
+        let eq = f.equalizer.expect("bass boost should produce an equalizer");
+        assert_eq!(eq.len(), 4, "boost touches the lowest 4 bands");
+        assert!(eq.iter().all(|b| b.gain > 0.0), "all bands gain > 0");
+        assert!(eq.iter().enumerate().all(|(i, b)| b.band == i as u8));
+    }
+
+    #[test]
+    fn filter_state_to_lavalink_speed_pitch_set_timescale() {
+        let s = crate::music_backend::FilterState {
+            speed: 1.2,
+            pitch: 0.8,
+            ..crate::music_backend::FilterState::neutral()
+        };
+        let f = filter_state_to_lavalink(&s);
+        let ts = f.timescale.expect("speed/pitch should produce a timescale");
+        assert!((ts.speed.unwrap() - 1.2).abs() < 0.001);
+        assert!((ts.pitch.unwrap() - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn filter_state_to_lavalink_neutral_speed_pitch_emits_no_timescale() {
+        // Setting speed=1.0 and pitch=1.0 explicitly should still produce no
+        // timescale filter (lavalink treats absent as 1.0; sending 1.0 is
+        // wasted bandwidth and makes the on-the-wire payload non-empty for
+        // no behavioral change).
+        let s = crate::music_backend::FilterState {
+            speed: 1.0,
+            pitch: 1.0,
+            ..crate::music_backend::FilterState::neutral()
+        };
+        let f = filter_state_to_lavalink(&s);
+        assert!(f.timescale.is_none());
+    }
+
+    #[test]
+    fn track_from_lavalink_pulls_known_fields() {
+        let mut td = lavalink_rs::model::track::TrackData::default();
+        td.info.title = "Title".into();
+        td.info.author = "Artist".into();
+        td.info.uri = Some("https://example/t".into());
+        td.info.length = 12345;
+        // user_data carries our requester id annotation when our own play()
+        // path enqueued it; track_from_lavalink should pick that up.
+        td.user_data = Some(serde_json::json!({"requester_id": 42u64}));
+
+        let t = track_from_lavalink(&td);
+        assert_eq!(t.title, "Title");
+        assert_eq!(t.author, "Artist");
+        assert_eq!(t.uri.as_deref(), Some("https://example/t"));
+        assert_eq!(t.duration_ms, Some(12345));
+        assert_eq!(t.requester, Some(42));
+    }
+
+    #[test]
     fn lavalink_config_serialization() {
         let config = LavalinkConfig {
             hostname: "example.com:2333".to_string(),

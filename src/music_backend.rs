@@ -258,4 +258,32 @@ mod tests {
     fn backend_is_dyn_compatible() {
         fn _assert(_: &Arc<dyn MusicBackend>) {}
     }
+
+    #[test]
+    fn filter_state_neutral_is_neutral() {
+        let s = FilterState::neutral();
+        assert!(!s.bass_boost);
+        assert!((s.speed - 1.0).abs() < f32::EPSILON);
+        assert!((s.pitch - 1.0).abs() < f32::EPSILON);
+        assert!(s.is_neutral());
+    }
+
+    #[test]
+    fn filter_state_is_neutral_detects_any_deviation() {
+        let mut s = FilterState::neutral();
+        assert!(s.is_neutral());
+        s.bass_boost = true;
+        assert!(!s.is_neutral());
+        s.bass_boost = false;
+        s.speed = 1.2;
+        assert!(!s.is_neutral());
+        s.speed = 1.0;
+        s.pitch = 0.8;
+        assert!(!s.is_neutral());
+    }
+
+    #[test]
+    fn loop_mode_default_is_off() {
+        assert_eq!(LoopMode::default(), LoopMode::Off);
+    }
 }

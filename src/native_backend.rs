@@ -747,6 +747,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn title_from_url_pulls_basename() {
+        // Plain path: takes the file name after the last `/`.
+        assert_eq!(title_from_url("https://x/y/song.mp3"), "song.mp3");
+        // Trailing slash leaves the filter with an empty segment, so we
+        // fall back to the full URL.
+        assert_eq!(title_from_url("https://x/y/"), "https://x/y/");
+        // Query string is stripped before basename extraction.
+        assert_eq!(title_from_url("https://x/y/track.ogg?t=42"), "track.ogg");
+        // Bare URL with no path: the host becomes the basename (best effort —
+        // there's no real filename to recover here).
+        assert_eq!(title_from_url("https://example.com"), "example.com");
+    }
+
+    #[test]
     fn apply_perm_is_correct() {
         // Identity perm leaves array untouched.
         let mut a = vec!['a', 'b', 'c'];
